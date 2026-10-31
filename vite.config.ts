@@ -7,6 +7,20 @@ const base = process.env.BASE_PATH || (process.env.GITHUB_ACTIONS ? '/aiRead/' :
 
 export default defineConfig({
   base,
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/xlsx')) {
+            return 'xlsx-vendor';
+          }
+          if (id.includes('node_modules/tesseract.js')) {
+            return 'tesseract-vendor';
+          }
+        },
+      },
+    },
+  },
   plugins: [
     tailwindcss(),
     react(),
@@ -15,11 +29,8 @@ export default defineConfig({
       includeAssets: [
         'favicon.svg',
         'icon.svg',
-        'apple-touch-icon.png',
         'pwa-192x192.svg',
         'pwa-512x512.svg',
-        'pwa-192x192.png',
-        'pwa-512x512.png',
       ],
       manifest: {
         name: 'aiRead',
@@ -68,26 +79,29 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,woff,woff2}'],
         runtimeCaching: [
           {
-            urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
-            handler: 'StaleWhileRevalidate',
+            urlPattern: /^https:\/\/cdn\.jsdelivr\.net\/.*tesseract.*/i,
+            handler: 'CacheFirst',
             options: {
-              cacheName: 'google-fonts-stylesheets',
+              cacheName: 'tesseract-cdn-assets',
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
               expiration: {
-                maxEntries: 10,
+                maxEntries: 20,
                 maxAgeSeconds: 60 * 60 * 24 * 365,
               },
             },
           },
           {
-            urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
+            urlPattern: /^https:\/\/tessdata\.projectnaptha\.com\/.*/i,
             handler: 'CacheFirst',
             options: {
-              cacheName: 'google-fonts-webfonts',
+              cacheName: 'tesseract-traineddata',
               cacheableResponse: {
                 statuses: [0, 200],
               },
               expiration: {
-                maxEntries: 30,
+                maxEntries: 10,
                 maxAgeSeconds: 60 * 60 * 24 * 365,
               },
             },

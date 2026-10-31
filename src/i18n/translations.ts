@@ -73,6 +73,7 @@ export interface Translations {
     uploadOrTakePhoto: string;
     processingOcr: string;
     processingBatchItem: string;
+    ocrErrorNotice: string;
     verifyOneByOneTitle: string;
     pendingVerificationCount: string;
     stagingTableTitle: string;
@@ -176,6 +177,8 @@ export const translations: Record<Language, Translations> = {
       uploadOrTakePhoto: 'Pasirinkite arba nufotografuokite dokumentą',
       processingOcr: 'Atpažįstamas tekstas įrenginyje...',
       processingBatchItem: 'Apdorojama: {current} iš {total} ({fileName})...',
+      ocrErrorNotice:
+        'Nepavyko nuskaityti nuotraukos teksto. Duomenis galite suvesti rankiniu būdu.',
       verifyOneByOneTitle: 'Tikrinti po vieną ({current} iš {total})',
       pendingVerificationCount: 'Laukia patvirtinimo ({count})',
       stagingTableTitle: 'Laikina patikros lentelė',
@@ -277,6 +280,8 @@ export const translations: Record<Language, Translations> = {
       uploadOrTakePhoto: 'Choose or take a photo of a document',
       processingOcr: 'Extracting text locally on device...',
       processingBatchItem: 'Processing {current} of {total} ({fileName})...',
+      ocrErrorNotice:
+        'Failed to extract text from photo. You can fill in the fields manually.',
       verifyOneByOneTitle: 'Verify One-by-One ({current} of {total})',
       pendingVerificationCount: 'Pending Verification ({count})',
       stagingTableTitle: 'Staging Queue Table',

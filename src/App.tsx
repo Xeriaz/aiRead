@@ -133,6 +133,7 @@ export default function App() {
   const [isProcessingOcr, setIsProcessingOcr] = useState(false);
   const [ocrProgress, setOcrProgress] = useState(0);
   const [lastScannedFileName, setLastScannedFileName] = useState('');
+  const [ocrErrorMessage, setOcrErrorMessage] = useState<string | null>(null);
 
   // Bulk Import & Sequential Staging Verification state (Zero image persistence)
   const [isBatchProcessing, setIsBatchProcessing] = useState(false);
@@ -143,7 +144,7 @@ export default function App() {
   const stopBatchRef = useRef(false);
 
   const [stagingSortLowestFirst, setStagingSortLowestFirst] = useState(false);
-  const [activeStagingIndex, setActiveStagingIndex] = useState(0);
+  const [activeStagingId, setActiveStagingId] = useState<number | null>(null);
   const [stagingEditFields, setStagingEditFields] = useState<ParsedDocumentFields>(EMPTY_FORM);
   const [stagingEditCandidates, setStagingEditCandidates] =
     useState<ParsedDocumentCandidates>(EMPTY_CANDIDATES);
@@ -166,6 +167,18 @@ export default function App() {
     document.documentElement.lang = lang;
     localStorage.setItem('aiRead_lang', lang);
   }, [lang]);
+
+  // Modal Escape key listener
+  useEffect(() => {
+    if (!isModalOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsModalOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isModalOpen]);
 
   const loadRecords = async () => {
     const items = await db.records.orderBy('id').toArray();
@@ -218,13 +231,20 @@ export default function App() {
     return copy;
   }, [stagingRecords, stagingSortLowestFirst]);
 
-  const clampedStagingIndex =
-    sortedStagingRecords.length === 0
-      ? 0
-      : Math.min(activeStagingIndex, sortedStagingRecords.length - 1);
+  const currentStagingRecord: StagingRecord | undefined = useMemo(() => {
+    if (sortedStagingRecords.length === 0) return undefined;
+    if (activeStagingId !== null) {
+      const match = sortedStagingRecords.find((r) => r.id === activeStagingId);
+      if (match) return match;
+    }
+    return sortedStagingRecords[0];
+  }, [sortedStagingRecords, activeStagingId]);
 
-  const currentStagingRecord: StagingRecord | undefined =
-    sortedStagingRecords[clampedStagingIndex];
+  const clampedStagingIndex = useMemo(() => {
+    if (!currentStagingRecord) return 0;
+    const idx = sortedStagingRecords.findIndex((r) => r.id === currentStagingRecord.id);
+    return idx === -1 ? 0 : idx;
+  }, [sortedStagingRecords, currentStagingRecord]);
 
   useEffect(() => {
     if (!currentStagingRecord) {
@@ -244,17 +264,7 @@ export default function App() {
     });
     setStagingEditCandidates(currentStagingRecord.candidates ?? EMPTY_CANDIDATES);
     setStagingEditRawText(currentStagingRecord.rawText ?? '');
-  }, [
-    currentStagingRecord?.id,
-    currentStagingRecord?.fullName,
-    currentStagingRecord?.address,
-    currentStagingRecord?.phone,
-    currentStagingRecord?.licensePlate,
-    currentStagingRecord?.carModel,
-    currentStagingRecord?.validPeriod,
-    currentStagingRecord?.personalCode,
-    currentStagingRecord?.rawText,
-  ]);
+  }, [currentStagingRecord?.id]);
 
   const openNewRecordModal = () => {
     setEditingId(null);
@@ -349,11 +359,11 @@ export default function App() {
   // Single image upload for local OCR (transient memory only, never stored)
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    // Reset file input immediately so the File reference is not retained on the DOM element
     e.target.value = '';
     if (!file) return;
 
     setLastScannedFileName(file.name);
+    setOcrErrorMessage(null);
     setIsProcessingOcr(true);
     setOcrProgress(5);
 
@@ -367,6 +377,8 @@ export default function App() {
       setImportCandidates(candidates);
       const parsed = parseDocumentText(text);
       setImportFields(parsed);
+    } catch {
+      setOcrErrorMessage(t.labels.ocrErrorNotice);
     } finally {
       setIsProcessingOcr(false);
       setOcrProgress(0);
@@ -376,7 +388,6 @@ export default function App() {
   // Sequential Bulk Photo Upload -> Staging Queue (Zero photo persistence)
   const handleBulkPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files ? Array.from(e.target.files) : [];
-    // Immediately clear file input so File references are never retained on the DOM element
     e.target.value = '';
     if (fileList.length === 0) return;
 
@@ -392,24 +403,37 @@ export default function App() {
         setBatchCurrentFileName(file.name);
         setBatchFileProgress(5);
 
-        const { text, confidence } = await extractTextAndConfidenceFromImageFile(file, (p) =>
-          setBatchFileProgress(p)
-        );
-        const candidates = parseDocumentCandidates(text);
-        const parsed = parseDocumentText(text);
-        const normalized = normalizeRecordFields(parsed);
-        const accuracyScore = calculateAccuracyScore(normalized, confidence);
-        const now = new Date().toISOString();
+        try {
+          const { text } = await extractTextAndConfidenceFromImageFile(file, (p) =>
+            setBatchFileProgress(p)
+          );
+          const candidates = parseDocumentCandidates(text);
+          const parsed = parseDocumentText(text);
+          const normalized = normalizeRecordFields(parsed);
+          const accuracyScore = calculateAccuracyScore(normalized);
+          const now = new Date().toISOString();
 
-        await db.stagingRecords.add({
-          imageName: file.name,
-          ...normalized,
-          accuracyScore,
-          rawText: text,
-          candidates,
-          createdAt: now,
-          updatedAt: now,
-        });
+          await db.stagingRecords.add({
+            imageName: file.name,
+            ...normalized,
+            accuracyScore,
+            rawText: text,
+            candidates,
+            createdAt: now,
+            updatedAt: now,
+          });
+        } catch {
+          const now = new Date().toISOString();
+          await db.stagingRecords.add({
+            imageName: file.name,
+            ...EMPTY_FORM,
+            accuracyScore: 0,
+            rawText: '',
+            candidates: EMPTY_CANDIDATES,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
 
         await loadStagingRecords();
       }
@@ -426,22 +450,20 @@ export default function App() {
   const handleStagingFieldsChange: React.Dispatch<React.SetStateAction<ParsedDocumentFields>> = (
     updater
   ) => {
-    setStagingEditFields((prev) => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      if (currentStagingRecord?.id !== undefined) {
-        const normalized = normalizeRecordFields(next);
-        const nextScore = calculateAccuracyScore(normalized);
-        const now = new Date().toISOString();
-        void db.stagingRecords
-          .update(currentStagingRecord.id, {
-            ...next,
-            accuracyScore: nextScore,
-            updatedAt: now,
-          })
-          .then(() => loadStagingRecords());
-      }
-      return next;
-    });
+    const next = typeof updater === 'function' ? updater(stagingEditFields) : updater;
+    setStagingEditFields(next);
+    if (currentStagingRecord?.id !== undefined) {
+      const normalized = normalizeRecordFields(next);
+      const nextScore = calculateAccuracyScore(normalized);
+      const now = new Date().toISOString();
+      void db.stagingRecords
+        .update(currentStagingRecord.id, {
+          ...next,
+          accuracyScore: nextScore,
+          updatedAt: now,
+        })
+        .then(() => loadStagingRecords());
+    }
   };
 
   const handleStagingRawTextChange = (text: string) => {
@@ -466,26 +488,54 @@ export default function App() {
     }
   };
 
+  const advanceStagingIdAfterRemoval = (removedId: number) => {
+    const currentIndex = sortedStagingRecords.findIndex((r) => r.id === removedId);
+    if (currentIndex !== -1) {
+      const nextRecord =
+        sortedStagingRecords[currentIndex + 1] || sortedStagingRecords[currentIndex - 1];
+      setActiveStagingId(nextRecord?.id ?? null);
+    }
+  };
+
+  const handleApproveStagingId = async (
+    targetId: number,
+    fieldsToUse: ParsedDocumentFields,
+    targetItem?: StagingRecord
+  ) => {
+    advanceStagingIdAfterRemoval(targetId);
+
+    await db.transaction('rw', db.records, db.stagingRecords, async () => {
+      const existing = await db.stagingRecords.get(targetId);
+      if (!existing) return;
+
+      const normalized = normalizeRecordFields(fieldsToUse);
+      const accuracyScore = calculateAccuracyScore(normalized);
+      const now = new Date().toISOString();
+
+      await db.records.add({
+        imageName: targetItem?.imageName ?? existing.imageName,
+        ...normalized,
+        accuracyScore,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await db.stagingRecords.delete(targetId);
+    });
+
+    await Promise.all([loadRecords(), loadStagingRecords()]);
+  };
+
   const handleApproveCurrentStaging = async () => {
     if (!currentStagingRecord || currentStagingRecord.id === undefined) return;
-    const normalized = normalizeRecordFields(stagingEditFields);
-    const accuracyScore = calculateAccuracyScore(normalized);
-    const now = new Date().toISOString();
-
-    await db.records.add({
-      imageName: currentStagingRecord.imageName,
-      ...normalized,
-      accuracyScore,
-      createdAt: now,
-      updatedAt: now,
-    });
-    await db.stagingRecords.delete(currentStagingRecord.id);
-    await Promise.all([loadRecords(), loadStagingRecords()]);
+    await handleApproveStagingId(
+      currentStagingRecord.id,
+      stagingEditFields,
+      currentStagingRecord
+    );
   };
 
   const handleApproveStagingRow = async (item: StagingRecord) => {
     if (item.id === undefined) return;
-    // If approving the currently edited item, use the live edited fields
     const sourceFields: ParsedDocumentFields =
       currentStagingRecord?.id === item.id
         ? stagingEditFields
@@ -498,23 +548,12 @@ export default function App() {
             validPeriod: item.validPeriod,
             personalCode: item.personalCode,
           };
-    const normalized = normalizeRecordFields(sourceFields);
-    const accuracyScore = calculateAccuracyScore(normalized);
-    const now = new Date().toISOString();
-
-    await db.records.add({
-      imageName: item.imageName,
-      ...normalized,
-      accuracyScore,
-      createdAt: now,
-      updatedAt: now,
-    });
-    await db.stagingRecords.delete(item.id);
-    await Promise.all([loadRecords(), loadStagingRecords()]);
+    await handleApproveStagingId(item.id, sourceFields, item);
   };
 
   const handleRejectStagingRow = async (id?: number) => {
     if (id === undefined) return;
+    advanceStagingIdAfterRemoval(id);
     await db.stagingRecords.delete(id);
     await loadStagingRecords();
   };
@@ -544,7 +583,6 @@ export default function App() {
       updatedAt: now,
     });
 
-    // Clear all transient OCR text and fields
     setRawOcrText('');
     setImportFields(EMPTY_FORM);
     setImportCandidates(EMPTY_CANDIDATES);
@@ -630,19 +668,33 @@ export default function App() {
     };
 
     const emptyFieldKeys = FORM_FIELD_KEYS.filter((k) => values[k].trim().length === 0);
+    const isUntouchedBlankForm = target !== 'staging' && emptyFieldKeys.length === 7;
 
-    const getInputBorderClasses = (val: string) =>
-      val.trim().length === 0
-        ? 'border-rose-400/80 dark:border-rose-500/60 bg-rose-50/40 dark:bg-rose-950/20 focus:ring-rose-500'
-        : 'border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 focus:ring-indigo-500';
+    const getInputBorderClasses = (val: string) => {
+      if (val.trim().length === 0) {
+        if (isUntouchedBlankForm) {
+          return 'border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 focus:ring-indigo-500';
+        }
+        return 'border-rose-400/80 dark:border-rose-500/60 bg-rose-50/40 dark:bg-rose-950/20 focus:ring-rose-500';
+      }
+      return 'border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 focus:ring-indigo-500';
+    };
 
     const renderFieldStatusBadge = (fieldKey: keyof ParsedDocumentFields, val: string) =>
       val.trim().length === 0 ? (
         <span
           data-testid={`${idPrefix}-empty-badge-${fieldKey}`}
-          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/25"
+          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold ${
+            isUntouchedBlankForm
+              ? 'bg-slate-500/10 text-slate-600 dark:text-zinc-400 border border-slate-500/20'
+              : 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/25'
+          }`}
         >
-          <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" />
+          <span
+            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+              isUntouchedBlankForm ? 'bg-slate-400' : 'bg-rose-500'
+            }`}
+          />
           <span>{t.labels.emptyFieldBadge}</span>
         </span>
       ) : (
@@ -658,10 +710,24 @@ export default function App() {
         {emptyFieldKeys.length > 0 ? (
           <div
             data-testid={`${idPrefix}-empty-columns-notice`}
-            className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 space-y-1.5"
+            className={`rounded-xl border px-3 py-2 space-y-1.5 ${
+              isUntouchedBlankForm
+                ? 'border-slate-200 dark:border-zinc-800 bg-slate-100/70 dark:bg-zinc-900/60'
+                : 'border-rose-500/30 bg-rose-500/10'
+            }`}
           >
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-rose-700 dark:text-rose-300">
-              <AlertCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+            <div
+              className={`flex items-center gap-1.5 text-[11px] font-semibold ${
+                isUntouchedBlankForm
+                  ? 'text-slate-600 dark:text-zinc-400'
+                  : 'text-rose-700 dark:text-rose-300'
+              }`}
+            >
+              <AlertCircle
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  isUntouchedBlankForm ? 'text-slate-400' : 'text-rose-500'
+                }`}
+              />
               <span>
                 {t.labels.emptyFieldsSummary.replace('{count}', String(emptyFieldKeys.length))}
               </span>
@@ -676,9 +742,17 @@ export default function App() {
                     const el = document.getElementById(`${idPrefix}-${key}`);
                     el?.focus();
                   }}
-                  className="touch-press inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-medium bg-white/90 dark:bg-zinc-900/90 text-rose-700 dark:text-rose-300 border border-rose-500/30 hover:bg-rose-500/20 transition-colors"
+                  className={`touch-press inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-medium border transition-colors ${
+                    isUntouchedBlankForm
+                      ? 'bg-white dark:bg-zinc-800 text-slate-700 dark:text-zinc-300 border-slate-300 dark:border-zinc-700 hover:bg-slate-50'
+                      : 'bg-white/90 dark:bg-zinc-900/90 text-rose-700 dark:text-rose-300 border-rose-500/30 hover:bg-rose-500/20'
+                  }`}
                 >
-                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      isUntouchedBlankForm ? 'bg-slate-400' : 'bg-rose-500'
+                    }`}
+                  />
                   <span>{t.columns[key]}</span>
                 </button>
               ))}
@@ -943,6 +1017,13 @@ export default function App() {
   const liveModalScore = calculateAccuracyScore(normalizeRecordFields(formFields));
   const liveStagingScore = calculateAccuracyScore(normalizeRecordFields(stagingEditFields));
 
+  const isModalSubmitDisabled = !Object.values(normalizeRecordFields(formFields)).some(
+    (v) => v.length > 0
+  );
+  const isImportSubmitDisabled = !Object.values(normalizeRecordFields(importFields)).some(
+    (v) => v.length > 0
+  );
+
   return (
     <div className="min-h-dvh w-full max-w-full flex flex-col bg-slate-50 dark:bg-zinc-950 text-slate-900 dark:text-zinc-50 transition-colors overflow-x-hidden">
       {/* Top Sticky Header (iPhone 16 Pro Dynamic Island safe-area aware) */}
@@ -1015,27 +1096,30 @@ export default function App() {
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
+                    disabled={filteredRecords.length === 0}
                     onClick={() => exportToCsv(filteredRecords, lang)}
                     aria-label="Export CSV"
-                    className="touch-press inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 text-[11px] font-semibold text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800"
+                    className="touch-press inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 text-[11px] font-semibold text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Download className="w-3 h-3" />
                     <span>{t.actions.exportCsv}</span>
                   </button>
                   <button
                     type="button"
+                    disabled={filteredRecords.length === 0}
                     onClick={() => exportToXlsx(filteredRecords, lang)}
                     aria-label="Export XLSX"
-                    className="touch-press inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 text-[11px] font-semibold text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800"
+                    className="touch-press inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 text-[11px] font-semibold text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Download className="w-3 h-3" />
                     <span>{t.actions.exportXlsx}</span>
                   </button>
                   <button
                     type="button"
+                    disabled={filteredRecords.length === 0}
                     onClick={() => exportToJson(filteredRecords, lang)}
                     aria-label="Export JSON"
-                    className="touch-press inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 text-[11px] font-semibold text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800"
+                    className="touch-press inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 text-[11px] font-semibold text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Download className="w-3 h-3" />
                     <span>{t.actions.exportJson}</span>
@@ -1117,12 +1201,12 @@ export default function App() {
               /* Full CRUD Table inside smooth horizontal container */
               <div className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-2xs overflow-hidden">
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
+                  <table className="w-full text-left border-collapse text-xs table-auto">
                     <thead>
                       <tr className="border-b border-slate-200 dark:border-zinc-800 bg-slate-50/80 dark:bg-zinc-950/60 text-[11px] font-semibold text-slate-600 dark:text-zinc-400 whitespace-nowrap">
                         <th className="py-2.5 px-2.5 w-12 text-center">{t.columns.rowNumber}</th>
-                        <th className="py-2.5 px-3">{t.columns.fullName}</th>
-                        <th className="py-2.5 px-3">{t.columns.address}</th>
+                        <th className="py-2.5 px-3 min-w-[140px] max-w-[200px]">{t.columns.fullName}</th>
+                        <th className="py-2.5 px-3 min-w-[180px] max-w-[240px]">{t.columns.address}</th>
                         <th className="py-2.5 px-3">{t.columns.phone}</th>
                         <th className="py-2.5 px-3">{t.columns.licensePlate}</th>
                         <th className="py-2.5 px-3">{t.columns.carModel}</th>
@@ -1144,10 +1228,23 @@ export default function App() {
                             <td className="py-2.5 px-2.5 text-center font-mono font-semibold text-slate-500 dark:text-zinc-400">
                               {index + 1}
                             </td>
-                            <td className="py-2.5 px-3 font-medium whitespace-nowrap">
-                              {rec.fullName || '—'}
+                            <td className="py-2.5 px-3 font-medium min-w-[140px] max-w-[200px]">
+                              <div className="flex flex-col gap-0.5">
+                                <span className="truncate" title={rec.fullName || ''}>
+                                  {rec.fullName || '—'}
+                                </span>
+                                {rec.imageName && (
+                                  <span
+                                    title={rec.imageName}
+                                    className="inline-flex items-center gap-1 text-[10px] text-slate-400 dark:text-zinc-500 truncate max-w-[160px]"
+                                  >
+                                    <FileImage className="w-3 h-3 text-indigo-400 shrink-0" />
+                                    <span className="truncate">{rec.imageName}</span>
+                                  </span>
+                                )}
+                              </div>
                             </td>
-                            <td className="py-2.5 px-3 max-w-[200px] truncate" title={rec.address}>
+                            <td className="py-2.5 px-3 min-w-[180px] max-w-[240px] truncate" title={rec.address}>
                               {rec.address || '—'}
                             </td>
                             <td className="py-2.5 px-3 font-mono whitespace-nowrap">
@@ -1192,7 +1289,7 @@ export default function App() {
                               </span>
                             </td>
                             <td className="py-2.5 px-2.5 text-right whitespace-nowrap">
-                              <div className="inline-flex items-center justify-end gap-1">
+                              <div className="inline-flex items-center justify-end gap-1.5">
                                 <button
                                   type="button"
                                   onClick={() => openEditRecordModal(rec)}
@@ -1231,6 +1328,7 @@ export default function App() {
               <div className="space-y-2.5">
                 {filteredRecords.map((rec, index) => {
                   const score = rec.accuracyScore ?? calculateAccuracyScore(rec);
+                  const status = getValidityStatus(rec.validPeriod);
                   return (
                     <div
                       key={rec.id ?? index}
@@ -1245,11 +1343,22 @@ export default function App() {
                             <h3 className="text-sm font-semibold truncate">
                               {rec.fullName || '—'}
                             </h3>
-                            {rec.personalCode && (
-                              <p className="text-[11px] font-mono text-slate-500 dark:text-zinc-400">
-                                {t.columns.personalCode}: {rec.personalCode}
-                              </p>
-                            )}
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {rec.personalCode && (
+                                <p className="text-[11px] font-mono text-slate-500 dark:text-zinc-400">
+                                  {t.columns.personalCode}: {rec.personalCode}
+                                </p>
+                              )}
+                              {rec.imageName && (
+                                <span
+                                  title={rec.imageName}
+                                  className="inline-flex items-center gap-1 text-[10px] text-slate-400 dark:text-zinc-500 truncate max-w-[160px]"
+                                >
+                                  <FileImage className="w-3 h-3 text-indigo-400 shrink-0" />
+                                  <span className="truncate">{rec.imageName}</span>
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
 
@@ -1268,6 +1377,14 @@ export default function App() {
                             className="touch-press p-1.5 rounded-lg text-slate-500 hover:text-indigo-600"
                           >
                             <Edit3 className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDuplicateRecord(rec)}
+                            aria-label={`${t.actions.duplicate} ${rec.fullName || index + 1}`}
+                            className="touch-press p-1.5 rounded-lg text-slate-500 hover:text-indigo-600"
+                          >
+                            <Copy className="w-4 h-4" />
                           </button>
                           <button
                             type="button"
@@ -1308,7 +1425,17 @@ export default function App() {
                         {rec.validPeriod && (
                           <div className="col-span-2 flex items-center gap-1.5 font-mono text-[11px] text-slate-600 dark:text-zinc-300">
                             <Calendar className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                            <span>{rec.validPeriod}</span>
+                            <span
+                              className={
+                                status === 'expired'
+                                  ? 'text-red-600 dark:text-red-400 font-semibold'
+                                  : status === 'expiring'
+                                    ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                                    : ''
+                              }
+                            >
+                              {rec.validPeriod}
+                            </span>
                           </div>
                         )}
                       </div>
@@ -1329,6 +1456,24 @@ export default function App() {
                   {t.labels.importSubtitle}
                 </p>
               </div>
+
+              {/* Dismissible OCR Error Banner */}
+              {ocrErrorMessage && (
+                <div className="flex items-center justify-between gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
+                    <span>{ocrErrorMessage}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setOcrErrorMessage(null)}
+                    aria-label="Dismiss error"
+                    className="p-1 text-rose-500 hover:text-rose-700"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
 
               {/* Strict Privacy Banner: Zero photo saving */}
               <div className="flex items-center gap-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 px-3 py-2 text-[11px] text-emerald-700 dark:text-emerald-300">
@@ -1438,7 +1583,8 @@ export default function App() {
                 <div className="flex items-center gap-2 pt-2">
                   <button
                     type="submit"
-                    className="touch-press flex-1 py-2.5 px-4 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white font-semibold text-xs shadow-xs flex items-center justify-center gap-1.5"
+                    disabled={isImportSubmitDisabled}
+                    className="touch-press flex-1 py-2.5 px-4 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white font-semibold text-xs shadow-xs flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Plus className="w-4 h-4" />
                     <span>{t.actions.save}</span>
@@ -1451,6 +1597,7 @@ export default function App() {
                       setImportCandidates(EMPTY_CANDIDATES);
                       setImportOcrConfidence(undefined);
                       setLastScannedFileName('');
+                      setOcrErrorMessage(null);
                     }}
                     className="touch-press py-2.5 px-3.5 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-medium"
                   >
@@ -1621,9 +1768,10 @@ export default function App() {
                         <button
                           type="button"
                           disabled={clampedStagingIndex <= 0}
-                          onClick={() =>
-                            setActiveStagingIndex((prev) => Math.max(0, prev - 1))
-                          }
+                          onClick={() => {
+                            const prevItem = sortedStagingRecords[clampedStagingIndex - 1];
+                            if (prevItem?.id !== undefined) setActiveStagingId(prevItem.id);
+                          }}
                           aria-label="Previous staged item"
                           className="touch-press p-2 rounded-xl border border-slate-200 dark:border-zinc-800 disabled:opacity-40 text-xs font-semibold"
                         >
@@ -1632,11 +1780,10 @@ export default function App() {
                         <button
                           type="button"
                           disabled={clampedStagingIndex >= sortedStagingRecords.length - 1}
-                          onClick={() =>
-                            setActiveStagingIndex((prev) =>
-                              Math.min(sortedStagingRecords.length - 1, prev + 1)
-                            )
-                          }
+                          onClick={() => {
+                            const nextItem = sortedStagingRecords[clampedStagingIndex + 1];
+                            if (nextItem?.id !== undefined) setActiveStagingId(nextItem.id);
+                          }}
                           className="touch-press inline-flex items-center gap-1 px-3 py-2 rounded-xl border border-slate-200 dark:border-zinc-800 disabled:opacity-40 text-xs font-semibold"
                         >
                           <span>{t.actions.skip}</span>
@@ -1684,7 +1831,6 @@ export default function App() {
                       type="button"
                       onClick={() => {
                         setStagingSortLowestFirst((prev) => !prev);
-                        setActiveStagingIndex(0);
                       }}
                       className="touch-press inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-[11px] font-semibold text-slate-700 dark:text-zinc-300"
                     >
@@ -1781,7 +1927,9 @@ export default function App() {
                                   <div className="inline-flex items-center justify-end gap-1">
                                     <button
                                       type="button"
-                                      onClick={() => setActiveStagingIndex(idx)}
+                                      onClick={() => {
+                                        if (item.id !== undefined) setActiveStagingId(item.id);
+                                      }}
                                       className="touch-press px-2 py-1 rounded-lg border border-slate-200 dark:border-zinc-700 text-[11px] font-semibold hover:bg-slate-100 dark:hover:bg-zinc-800"
                                     >
                                       {t.actions.verifyItem}
@@ -1867,24 +2015,27 @@ export default function App() {
                 <div className="grid grid-cols-3 gap-2 pt-1">
                   <button
                     type="button"
+                    disabled={records.length === 0}
                     onClick={() => exportToCsv(records, lang)}
-                    className="touch-press py-2 px-3 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5"
+                    className="touch-press py-2 px-3 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>CSV</span>
                   </button>
                   <button
                     type="button"
+                    disabled={records.length === 0}
                     onClick={() => exportToXlsx(records, lang)}
-                    className="touch-press py-2 px-3 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5"
+                    className="touch-press py-2 px-3 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>XLSX</span>
                   </button>
                   <button
                     type="button"
+                    disabled={records.length === 0}
                     onClick={() => exportToJson(records, lang)}
-                    className="touch-press py-2 px-3 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5"
+                    className="touch-press py-2 px-3 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>JSON</span>
@@ -1913,9 +2064,17 @@ export default function App() {
           role="dialog"
           aria-modal="true"
           aria-label={editingId !== null ? t.labels.editRecordTitle : t.labels.newRecordTitle}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setIsModalOpen(false);
+            }
+          }}
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-xs p-0 sm:p-4"
         >
-          <div className="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 pb-safe shadow-xl space-y-3">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 pb-safe shadow-xl space-y-3"
+          >
             <div className="flex items-center justify-between border-b border-slate-100 dark:border-zinc-800 pb-2.5">
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-semibold">
@@ -1947,7 +2106,8 @@ export default function App() {
               <div className="flex items-center gap-2 pt-2">
                 <button
                   type="submit"
-                  className="touch-press flex-1 py-2.5 px-4 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white font-semibold text-xs shadow-xs"
+                  disabled={isModalSubmitDisabled}
+                  className="touch-press flex-1 py-2.5 px-4 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white font-semibold text-xs shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {editingId !== null ? t.actions.update : t.actions.save}
                 </button>

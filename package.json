@@ -13,7 +13,6 @@
     "deploy": "npm run test:run && BASE_PATH=/aiRead/ npm run build && bash -c 'set -euo pipefail; TMP_DIR=$(mktemp -d); trap \"git worktree remove --force \\\"$TMP_DIR\\\" 2>/dev/null || rm -rf \\\"$TMP_DIR\\\"\" EXIT; git worktree add --detach \"$TMP_DIR\"; cp -R dist/. \"$TMP_DIR/\"; cd \"$TMP_DIR\"; git add -f dist 2>/dev/null || true; git add -A; git commit -m \"Deploy update\"; git push origin HEAD:refs/heads/prod --force'"
   },
   "dependencies": {
-    "date-fns": "^4.1.0",
     "dexie": "^4.0.11",
     "lucide-react": "^0.475.0",
     "react": "^19.0.0",

@@ -6,9 +6,12 @@ import App from '../App';
 import { db } from '../db/db';
 import {
   calculateAccuracyScore,
+  extractLicensePlateCandidates,
   formatPhoneNumber,
   formatValidPeriod,
+  isValidCalendarDate,
   isValidLithuanianPersonalCode,
+  normalizeSingleDate,
   parseDocumentCandidates,
   parseDocumentText,
 } from '../utils/parser';
@@ -72,6 +75,22 @@ describe('Parser, Accuracy Scoring & Multi-Candidate Utilities', () => {
       personalCode: '',
     };
     expect(calculateAccuracyScore(lowFields)).toBe(5);
+  });
+
+  it('rejects impossible calendar dates and extracts correct EV license plates', () => {
+    expect(isValidCalendarDate(2026, 2, 31)).toBe(false);
+    expect(isValidCalendarDate(2026, 4, 31)).toBe(false);
+    expect(isValidCalendarDate(2024, 2, 29)).toBe(true);
+    expect(isValidCalendarDate(2025, 2, 29)).toBe(false);
+
+    expect(normalizeSingleDate('2026-02-31')).toBeNull();
+    expect(normalizeSingleDate('2026-04-31')).toBeNull();
+    expect(normalizeSingleDate('2026-05-15')).toBe('2026-05-15');
+
+    // EV License plate must not produce truncated 'EA123'
+    const plateCandidates = extractLicensePlateCandidates('Valst. nr. EA1234');
+    expect(plateCandidates).toEqual(['EA1234']);
+    expect(plateCandidates).not.toContain('EA123');
   });
 
   it('extracts all 7 fields and multi-candidate suggestions from Lithuanian document OCR text', () => {
@@ -183,6 +202,29 @@ describe('Export Utilities (CSV, XLSX, JSON)', () => {
     expect(csv).toContain(
       '1,Jonas Jonaitis,"Gedimino pr. 15-4, Vilnius",0-612-34567,ABC 123,VOLKSWAGEN PASSAT,2026-09-04 2027-09-04,38504121234,100%'
     );
+  });
+
+  it('escapes CSV cells with formula injection characters (=, +, -, @, \\t, \\r)', () => {
+    const injectionRecords = [
+      {
+        id: 1,
+        fullName: '=SUM(A1:A10)',
+        address: '+370 Vilnius',
+        phone: '-123456',
+        licensePlate: '@MALICIOUS',
+        carModel: '\tAUDI',
+        validPeriod: '\r2026-09-04',
+        personalCode: '38504121234',
+        accuracyScore: 100,
+        createdAt: '2026-09-04T10:00:00.000Z',
+        updatedAt: '2026-09-04T10:00:00.000Z',
+      },
+    ];
+    const csv = generateCsvContent(injectionRecords, 'lt');
+    expect(csv).toContain("'=SUM(A1:A10)");
+    expect(csv).toContain("'+370 Vilnius");
+    expect(csv).toContain("'-123456");
+    expect(csv).toContain("'@MALICIOUS");
   });
 
   it('generates JSON and XLSX buffer with localized columns including Tikslumas / Accuracy', () => {
@@ -419,6 +461,101 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
       expect(approvedRecords[0].imageName).toBe('scan_1.jpg');
       expect(approvedRecords[0].fullName).toBe('Jonas Jonaitis');
       expect(approvedRecords[0].address).toBe('Kauno g. 15');
+    } finally {
+      extractSpy.mockRestore();
+    }
+  });
+
+  it('keeps active staged record locked by activeStagingId when editing with lowest-first sorting enabled', async () => {
+    const user = userEvent.setup();
+    // Add two records directly to staging: item 1 (low score) and item 2 (high score)
+    await db.stagingRecords.clear();
+    await db.stagingRecords.add({
+      rawText: "",
+      candidates: { fullName: [], address: [], phone: [], licensePlate: [], carModel: [], validPeriod: [], personalCode: [] },
+      imageName: 'first.jpg',
+      fullName: 'Jonas',
+      address: '',
+      phone: '',
+      licensePlate: '',
+      carModel: '',
+      validPeriod: '',
+      personalCode: '',
+      accuracyScore: 5,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await db.stagingRecords.add({
+      rawText: "",
+      candidates: { fullName: [], address: [], phone: [], licensePlate: [], carModel: [], validPeriod: [], personalCode: [] },
+      imageName: 'second.jpg',
+      fullName: 'Petras Petraitis',
+      address: 'Gedimino pr. 10',
+      phone: '0-612-34567',
+      licensePlate: 'ABC 123',
+      carModel: 'TOYOTA COROLLA',
+      validPeriod: '2026-09-04 2027-09-04',
+      personalCode: '38504121234',
+      accuracyScore: 100,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    render(<App />);
+
+    // Go to Bulk tab
+    await user.click(screen.getByRole('button', { name: /Masinis/i }));
+    expect(await screen.findByTestId('one-by-one-wizard')).toBeInTheDocument();
+
+    // Enable lowest-accuracy sort
+    const sortBtn = screen.getByRole('button', { name: /Rikiuoti:/i });
+    await user.click(sortBtn);
+
+    // Verify first.jpg is active
+    expect(screen.getByTestId('wizard-image-name')).toHaveTextContent('first.jpg');
+
+    // Type full name to change accuracy score
+    const nameInput = within(screen.getByTestId('one-by-one-wizard')).getByLabelText(/Vardas Pavardė/i);
+    await user.type(nameInput, ' Jonaitis');
+
+    // Verify wizard remains locked on first.jpg even though accuracy score changed
+    expect(screen.getByTestId('wizard-image-name')).toHaveTextContent('first.jpg');
+    expect(nameInput).toHaveValue('Jonas Jonaitis');
+  });
+
+  it('recovers from per-file OCR error in bulk upload and continues processing subsequent files', async () => {
+    const extractSpy = vi
+      .spyOn(ocrModule, 'extractTextAndConfidenceFromImageFile')
+      .mockImplementation(async (file: File) => {
+        if (file.name === 'corrupted.jpg') {
+          throw new Error('Corrupted image data');
+        }
+        return {
+          text: 'Vardas, pavardė: Kazys Kazlauskas\nValst. nr.: CBA 321',
+          confidence: 80,
+        };
+      });
+
+    try {
+      const user = userEvent.setup();
+      await db.stagingRecords.clear();
+      render(<App />);
+
+      await user.click(screen.getByRole('button', { name: /Masinis/i }));
+      const fileInput = screen.getByTestId('bulk-file-input');
+
+      const corruptedFile = new File(['bad-data'], 'corrupted.jpg', { type: 'image/jpeg' });
+      const validFile = new File(['good-data'], 'valid.jpg', { type: 'image/jpeg' });
+
+      await user.upload(fileInput, [corruptedFile, validFile]);
+
+      // Verify both items were queued into db.stagingRecords, corrupted has accuracyScore 0
+      const staged = await db.stagingRecords.orderBy('id').toArray();
+      expect(staged).toHaveLength(2);
+      expect(staged[0].imageName).toBe('corrupted.jpg');
+      expect(staged[0].accuracyScore).toBe(0);
+      expect(staged[1].imageName).toBe('valid.jpg');
+      expect(staged[1].fullName).toBe('Kazys Kazlauskas');
     } finally {
       extractSpy.mockRestore();
     }

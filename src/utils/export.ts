@@ -47,9 +47,15 @@ export function buildLocalizedObjects(
   }));
 }
 
-function escapeCsvCell(value: string | number): string {
-  const str = String(value ?? '');
-  if (/[",\r\n]/.test(str)) {
+export function escapeCsvCell(value: string | number): string {
+  if (typeof value === 'number') {
+    return String(value);
+  }
+  let str = String(value ?? '');
+  if (/^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
+  if (/["',\r\n]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }
   return str;

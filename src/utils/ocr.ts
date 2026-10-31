@@ -1,4 +1,4 @@
-import { createWorker } from 'tesseract.js';
+import { createWorker, type Worker } from 'tesseract.js';
 
 export interface OcrProgressCallback {
   (progressPercent: number): void;
@@ -90,10 +90,52 @@ export function registerEphemeralResource(
 }
 
 /**
+ * Shared warm worker state for batch scans to avoid repeated heavy initialization.
+ */
+let warmWorkerPromise: Promise<Worker> | null = null;
+let warmWorkerHandle: EphemeralResourceHandle | null = null;
+let warmWorkerRelease: (() => Promise<void>) | null = null;
+let currentProgressCallback: OcrProgressCallback | null = null;
+
+async function getOrCreateWarmWorker(): Promise<Worker> {
+  // If a warm worker entry exists and is active, reset its TTL watchdog
+  if (warmWorkerRelease) {
+    await warmWorkerRelease();
+    warmWorkerRelease = null;
+  }
+
+  if (!warmWorkerPromise) {
+    warmWorkerPromise = (async () => {
+      const worker = await createWorker(['lit', 'eng'], 1, {
+        logger: (m) => {
+          if (m.status === 'recognizing text' && typeof m.progress === 'number') {
+            currentProgressCallback?.(Math.min(99, Math.round(15 + m.progress * 84)));
+          }
+        },
+      });
+      return worker;
+    })().catch((err) => {
+      warmWorkerPromise = null;
+      throw err;
+    });
+  }
+
+  const worker = await warmWorkerPromise;
+  warmWorkerHandle = { worker };
+  warmWorkerRelease = registerEphemeralResource(warmWorkerHandle, IMAGE_MEMORY_TTL_MS);
+  return worker;
+}
+
+/**
  * Immediately purges all active ephemeral image buffers, blob URLs, offscreen canvases,
  * and OCR workers currently registered in RAM.
  */
 export function cleanupAllEphemeralResources(): void {
+  warmWorkerPromise = null;
+  warmWorkerHandle = null;
+  warmWorkerRelease = null;
+  currentProgressCallback = null;
+
   for (const entry of Array.from(activeEphemeralRegistry)) {
     void disposeEphemeralEntry(entry);
   }
@@ -123,25 +165,18 @@ export async function extractTextAndConfidenceFromImageFile(
   const resourceHandle: EphemeralResourceHandle = {
     objectUrl,
     canvas: null,
-    worker: null,
   };
-  const releaseResources = registerEphemeralResource(resourceHandle, IMAGE_MEMORY_TTL_MS);
+  const releaseImageResources = registerEphemeralResource(resourceHandle, IMAGE_MEMORY_TTL_MS);
 
   try {
+    currentProgressCallback = onProgress ?? null;
     onProgress?.(5);
     const processedSource = await preprocessImageInMemory(objectUrl, (c) => {
       resourceHandle.canvas = c;
     });
 
     onProgress?.(15);
-    const worker = await createWorker(['lit', 'eng'], 1, {
-      logger: (m) => {
-        if (m.status === 'recognizing text' && typeof m.progress === 'number') {
-          onProgress?.(Math.min(99, Math.round(15 + m.progress * 84)));
-        }
-      },
-    });
-    resourceHandle.worker = worker;
+    const worker = await getOrCreateWarmWorker();
 
     const {
       data: { text, confidence },
@@ -152,7 +187,8 @@ export async function extractTextAndConfidenceFromImageFile(
       confidence: typeof confidence === 'number' ? confidence : undefined,
     };
   } finally {
-    await releaseResources();
+    currentProgressCallback = null;
+    await releaseImageResources();
   }
 }
 

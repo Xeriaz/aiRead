@@ -54,6 +54,18 @@ const CAR_MAKES = [
   'VW',
 ];
 
+const CAR_MAKE_PATTERNS = CAR_MAKES.map((make) => {
+  const escapedMake = make.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return {
+    make,
+    wordBoundaryRegex: new RegExp(`\\b${escapedMake}\\b`, 'i'),
+    modelLineRegex: new RegExp(
+      `\\b(${escapedMake})\\b(?:[\\s,/-]+([A-Z0-9ĄČĘĖĮŠŲŪŽ][A-Za-z0-9ĄČĘĖĮŠŲŪŽąčęėįšųūž.-]{0,15}(?:\\s+[A-Z0-9][A-Za-z0-9.-]{0,12})?))?`,
+      'i'
+    ),
+  };
+});
+
 const FALSE_POSITIVE_PLATES = new Set([
   'EUR',
   'PVM',
@@ -87,8 +99,34 @@ function addUniqueCandidate(list: string[], value: string): void {
 }
 
 /**
+ * Validates that a (year, month, day) triple represents a real calendar date
+ * (rejecting e.g. Feb 30, Feb 31, Apr 31, or Feb 29 on non-leap years).
+ */
+export function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day) ||
+    year < 1800 ||
+    year > 2100 ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31
+  ) {
+    return false;
+  }
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  return (
+    dt.getUTCFullYear() === year &&
+    dt.getUTCMonth() === month - 1 &&
+    dt.getUTCDate() === day
+  );
+}
+
+/**
  * Validates an 11-digit Lithuanian personal code (Asmens kodas),
- * including the official modulo-11 checksum algorithm.
+ * including strict calendar birth date validation and the official modulo-11 checksum algorithm.
  */
 export function isValidLithuanianPersonalCode(code: string): boolean {
   if (!code) return false;
@@ -98,6 +136,16 @@ export function isValidLithuanianPersonalCode(code: string): boolean {
   }
 
   const digits = trimmed.split('').map(Number);
+  const firstDigit = digits[0];
+  const century = firstDigit === 1 || firstDigit === 2 ? 1800 : firstDigit === 3 || firstDigit === 4 ? 1900 : 2000;
+  const yy = Number(trimmed.slice(1, 3));
+  const mm = Number(trimmed.slice(3, 5));
+  const dd = Number(trimmed.slice(5, 7));
+
+  if (!isValidCalendarDate(century + yy, mm, dd)) {
+    return false;
+  }
+
   const weights1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 1];
   const weights2 = [3, 4, 5, 6, 7, 8, 9, 1, 2, 3];
 
@@ -184,10 +232,9 @@ export function calculateAccuracyScore(
   // 5. carModel (10 pts): 10 pts if contains a known car make from CAR_MAKES; 5 pts if >= 2 chars; 0 pts otherwise.
   const model = (fields.carModel || '').trim().toUpperCase();
   if (model) {
-    const hasKnownMake = CAR_MAKES.some((make) => {
-      const escapedMake = make.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      return new RegExp(`\\b${escapedMake}\\b`, 'i').test(model);
-    });
+    const hasKnownMake = CAR_MAKE_PATTERNS.some(({ wordBoundaryRegex }) =>
+      wordBoundaryRegex.test(model)
+    );
     if (hasKnownMake) {
       fieldScore += 10;
     } else if (model.length >= 2) {
@@ -210,7 +257,7 @@ export function calculateAccuracyScore(
   const addr = (fields.address || '').trim();
   if (addr) {
     const addressMarkerRegex =
-      /(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|al\.|k\.|raj\.|sav\.)(?=\s|,|$)|\bLT-\d{5}\b|\b\d+-\d+\b)/i;
+      /(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|al\.|k\.|raj\.|sav\.)(?=\s|,|$)|\\bLT-\d{5}\b|\b\d+-\d+\b)/i;
     if (addr.length >= 6 && addressMarkerRegex.test(addr)) {
       fieldScore += 10;
     } else if (addr.length >= 4) {
@@ -275,7 +322,7 @@ export function normalizeSingleDate(token: string): string | null {
     const year = Number(y);
     const month = Number(m);
     const day = Number(d);
-    if (year >= 1990 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+    if (year >= 1990 && year <= 2100 && isValidCalendarDate(year, month, day)) {
       return `${y}-${m}-${d}`;
     }
   }
@@ -287,7 +334,7 @@ export function normalizeSingleDate(token: string): string | null {
     const year = Number(y);
     const month = Number(m);
     const day = Number(d);
-    if (year >= 1990 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+    if (year >= 1990 && year <= 2100 && isValidCalendarDate(year, month, day)) {
       return `${y}-${m}-${d}`;
     }
   }
@@ -407,7 +454,7 @@ export function extractPhoneCandidates(
 
   // 1. Look near phone labels first
   const labeledLineRegex =
-    /(?:tel(?:\.|efonas)?|mob(?:\.|ilus)?|phone)[:\s]*((?:\+370|00370|370|8|0)[\s()-]*(?:\d[\s()-]*){7,8})/gi;
+    /(?:tel(?:\.|efonas)?|mob(?:\.|ilus)?|phone)[:\s]*((?:\\+370|00370|370|8|0)[\s()-]*(?:\d[\s()-]*){7,8})/gi;
   for (const labeledMatch of text.matchAll(labeledLineRegex)) {
     const formatted = formatPhoneNumber(labeledMatch[1]);
     if (/^0-\d{3}-\d{5}$/.test(formatted)) {
@@ -475,7 +522,7 @@ export function extractValidPeriodCandidates(text: string): string[] {
     }
   }
 
-  // 2. Scan all dates in text
+  // 2. Scan all dates in text (non-overlapping adjacent pairs)
   const allTokens =
     text.match(/\b(?:\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\b/g) || [];
   const allIso: string[] = [];
@@ -487,7 +534,7 @@ export function extractValidPeriodCandidates(text: string): string[] {
   }
 
   if (allIso.length >= 2) {
-    for (let i = 0; i + 1 < allIso.length; i++) {
+    for (let i = 0; i + 1 < allIso.length; i += 2) {
       const d1 = allIso[i];
       const d2 = allIso[i + 1];
       addUniqueCandidate(candidates, d1 <= d2 ? `${d1} ${d2}` : `${d2} ${d1}`);
@@ -514,9 +561,9 @@ export function extractLicensePlateCandidates(text: string): string[] {
   if (!text) return [];
   const candidates: string[] = [];
 
-  // 1. Check explicitly labeled plates first
+  // 1. Check explicitly labeled plates first (EV 6-char pattern before 2-3 letter + 3 digit pattern)
   const labeledRegex =
-    /(?:valst\.?\s*nr\.?|valstybinis\s*nr\.?|reg\.?\s*nr\.?|plate(?:\s*no\.?)?)[:\s#-]*([A-Z]{2,3}[\s-]?\d{3}|\bE[A-Z]\d{4}\b|\b\d{3}[\s-]?[A-Z]{2,3}\b)/gi;
+    /(?:valst\.?\s*nr\.?|valstybinis\s*nr\.?|reg\.?\s*nr\.?|plate(?:\s*no\.?)?)[:\s#-]*(\bE[A-Z]\d{4}\b|\b[A-Z]{2,3}[\s-]?\d{3}\b|\b\d{3}[\s-]?[A-Z]{2,3}\b)/gi;
   for (const labeledMatch of text.matchAll(labeledRegex)) {
     const rawPlate = labeledMatch[1].toUpperCase().replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
     const stdMatch = rawPlate.match(/^([A-Z]{3})\s*(\d{3})$/);
@@ -524,14 +571,14 @@ export function extractLicensePlateCandidates(text: string): string[] {
   }
 
   // 2. Scan lines for standard Lithuanian plates (ABC 123 / ABC123 / EA1234)
-  const plateCandidates = text.matchAll(/\b([A-Z]{3})[\s-]?(\d{3})\b|\b(E[A-Z]\d{4})\b/g);
+  const plateCandidates = text.matchAll(/\b(E[A-Z]\d{4})\b|\b([A-Z]{3})[\s-]?(\d{3})\b/g);
   for (const match of plateCandidates) {
-    if (match[3]) {
-      addUniqueCandidate(candidates, match[3].toUpperCase());
+    if (match[1]) {
+      addUniqueCandidate(candidates, match[1].toUpperCase());
       continue;
     }
-    const letters = match[1].toUpperCase();
-    const digits = match[2];
+    const letters = match[2].toUpperCase();
+    const digits = match[3];
     if (FALSE_POSITIVE_PLATES.has(letters)) continue;
     addUniqueCandidate(candidates, `${letters} ${digits}`);
   }
@@ -556,13 +603,8 @@ export function extractCarModelCandidates(text: string): string[] {
 
   // 1. Look for known car makes across all lines
   for (const line of lines) {
-    for (const make of CAR_MAKES) {
-      const escapedMake = make.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const regex = new RegExp(
-        `\\b(${escapedMake})\\b(?:[\\s,/-]+([A-Z0-9ĄČĘĖĮŠŲŪŽ][A-Za-z0-9ĄČĘĖĮŠŲŪŽąčęėįšųūž.-]{0,15}(?:\\s+[A-Z0-9][A-Za-z0-9.-]{0,12})?))?`,
-        'i'
-      );
-      const match = line.match(regex);
+    for (const { modelLineRegex } of CAR_MAKE_PATTERNS) {
+      const match = line.match(modelLineRegex);
       if (match) {
         const detectedMake = match[1].toUpperCase() === 'VW' ? 'VOLKSWAGEN' : match[1].toUpperCase();
         let rawModel = (match[2] || '').trim();
@@ -616,13 +658,25 @@ export function extractCarModel(text: string): string {
 function splitMultipleStreetAddressesInLine(cleanedLine: string): string[] {
   const streetWithNumberRegex =
     /(?:(?:^|\s)(?:g\.|gatvė|pr\.|prospektas|al\.|alėja|skg\.|pl\.|plentas)\s*\d+)/i;
-  const parts = cleanedLine
-    .split(/[;,]/)
+
+  // 1. Check semicolon or slash delimiters first so city names after commas are preserved
+  const primaryParts = cleanedLine
+    .split(/;|\s+\/\s+/)
     .map((p) => p.trim())
     .filter(Boolean);
-  if (parts.length >= 2 && parts.every((p) => streetWithNumberRegex.test(p))) {
-    return parts;
+  if (primaryParts.length >= 2 && primaryParts.every((p) => streetWithNumberRegex.test(p))) {
+    return primaryParts;
   }
+
+  // 2. Fall back to comma splitting only when every comma-separated segment is a street address
+  const commaParts = cleanedLine
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (commaParts.length >= 2 && commaParts.every((p) => streetWithNumberRegex.test(p))) {
+    return commaParts;
+  }
+
   return [cleanedLine];
 }
 
@@ -649,7 +703,7 @@ export function extractAddressCandidates(text: string): string[] {
 
   // 2. Street / settlement / postal code heuristics across all lines
   const addressIndicator =
-    /(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|prospektas|al\.|alėja|skg\.|pl\.|plentas|a\.|aikštė|k\.|kaimas|mstl\.|raj\.|sav\.)(?=\s|,|$)|\bLT-\d{5}\b)/i;
+    /(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|prospektas|al\.|alėja|skg\.|pl\.|plentas|a\.|aikštė|k\.|kaimas|mstl\.|raj\.|sav\.)(?=\s|,|$)|\\bLT-\d{5}\b)/i;
 
   for (const line of lines) {
     if (addressIndicator.test(line)) {
@@ -724,7 +778,7 @@ export function extractFullNameCandidates(text: string): string[] {
 
   for (const line of lines) {
     // Skip lines that look like addresses or vehicle models
-    if (/(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|al\.)(?=\s|,|$)|\bLT-\d{5}\b)/i.test(line)) continue;
+    if (/(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|al\.)(?=\s|,|$)|\\bLT-\d{5}\b)/i.test(line)) continue;
     for (const match of line.matchAll(lithuanianNameRegex)) {
       const first = match[1];
       const last = match[2];
