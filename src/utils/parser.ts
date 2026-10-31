@@ -257,7 +257,7 @@ export function calculateAccuracyScore(
   const addr = (fields.address || '').trim();
   if (addr) {
     const addressMarkerRegex =
-      /(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|al\.|k\.|raj\.|sav\.)(?=\s|,|$)|\\bLT-\d{5}\b|\b\d+-\d+\b)/i;
+      /(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|al\.|k\.|raj\.|sav\.)(?=\s|,|$)|\bLT-\d{5}\b|\b\d+-\d+\b)/i;
     if (addr.length >= 6 && addressMarkerRegex.test(addr)) {
       fieldScore += 10;
     } else if (addr.length >= 4) {
@@ -454,7 +454,7 @@ export function extractPhoneCandidates(
 
   // 1. Look near phone labels first
   const labeledLineRegex =
-    /(?:tel(?:\.|efonas)?|mob(?:\.|ilus)?|phone)[:\s]*((?:\\+370|00370|370|8|0)[\s()-]*(?:\d[\s()-]*){7,8})/gi;
+    /(?:tel(?:\.|efonas)?|mob(?:\.|ilus)?|phone)[:\s]*((?:\+370|00370|370|8|0)[\s()-]*(?:\d[\s()-]*){7,8})/gi;
   for (const labeledMatch of text.matchAll(labeledLineRegex)) {
     const formatted = formatPhoneNumber(labeledMatch[1]);
     if (/^0-\d{3}-\d{5}$/.test(formatted)) {
@@ -703,7 +703,7 @@ export function extractAddressCandidates(text: string): string[] {
 
   // 2. Street / settlement / postal code heuristics across all lines
   const addressIndicator =
-    /(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|prospektas|al\.|alėja|skg\.|pl\.|plentas|a\.|aikštė|k\.|kaimas|mstl\.|raj\.|sav\.)(?=\s|,|$)|\\bLT-\d{5}\b)/i;
+    /(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|prospektas|al\.|alėja|skg\.|pl\.|plentas|a\.|aikštė|k\.|kaimas|mstl\.|raj\.|sav\.)(?=\s|,|$)|\bLT-\d{5}\b)/i;
 
   for (const line of lines) {
     if (addressIndicator.test(line)) {
@@ -731,65 +731,510 @@ export function extractAddress(text: string): string {
   return extractAddressCandidates(text)[0] || '';
 }
 
+const FALSE_POSITIVE_NAME_PHRASES = [
+  'arba įmonės pavadinimas',
+  'arba imones pavadinimas',
+  'įmonės pavadinimas',
+  'imones pavadinimas',
+  'firmos pavadinimas',
+  'company name',
+  'gimimo data',
+  'date of birth',
+  'birth date',
+  'asmens kodas',
+  'personal code',
+  'id kodas',
+  'būsto draudimas',
+  'busto draudimas',
+  'butas apsauga',
+  'civilinė atsakomybė',
+  'civiline atsakomybe',
+  'transporto priemonė',
+  'transporto priemone',
+  'draudimo polisas',
+  'draudimo liudijimas',
+  'draudimo rūšis',
+  'draudimo rusis',
+  'draudimo suma',
+  'draudimo įmoka',
+  'draudimo imoka',
+  'mokėtina suma',
+  'moketina suma',
+  'bendra suma',
+  'sumoka visą',
+  'sumoka visa',
+  'galiojimo data',
+  'galioja nuo',
+  'galioja iki',
+  'apmokėjimo terminas',
+  'apmokejimo terminas',
+  'swedbank',
+  'seb bankas',
+  'seb lizingas',
+  'šiaulių bankas',
+  'siauliu bankas',
+  'luminor',
+  'citadele',
+  'medicinos bankas',
+  'lietuvos draudimas',
+  'bta draudimas',
+  'ergo insurance',
+  'if draudimas',
+  'balcia insurance',
+  'gjensidige',
+  'compensa',
+  'vairuotojo pažymėjimas',
+  'vairuotojo pazymejimas',
+  'driving licence',
+  'driving license',
+  'registracijos liudijimas',
+  'lietuvos respublika',
+  'republic of lithuania',
+];
+
+const EXCLUDED_NAME_WORDS = new Set([
+  'LIETUVOS',
+  'RESPUBLIKA',
+  'VILNIUS',
+  'KAUNAS',
+  'KLAIPĖDA',
+  'KLAIPEDA',
+  'ŠIAULIAI',
+  'SIAULIAI',
+  'PANEVĖŽYS',
+  'PANEVEZYS',
+  'ALYTUS',
+  'VARDAS',
+  'PAVARDĖ',
+  'PAVARDE',
+  'ADRESAS',
+  'TELEFONAS',
+  'GALIOJIMAS',
+  'GALIOJA',
+  'ASMENS',
+  'KODAS',
+  'TRANSPORTO',
+  'PRIEMONĖ',
+  'PRIEMONE',
+  'VALSTYBINIS',
+  'NUMERIS',
+  'DRAUDĖJAS',
+  'DRAUDEJAS',
+  'APDRAUSTASIS',
+  'SAVININKAS',
+  'VALDYTOJAS',
+  'VAIRUOTOJAS',
+  'NAUDOTOJAS',
+  'KLIENTAS',
+  'MOKĖTOJAS',
+  'MOKETOJAS',
+  'PIRKĖJAS',
+  'PIRKEJAS',
+  'POLISAS',
+  'LIUDIJIMAS',
+  'DRAUDIMAS',
+  'BANKAS',
+  'SUMA',
+  'ĮMOKA',
+  'IMOKA',
+  'DATA',
+  'GIMIMO',
+  'VIETA',
+  'BUTAS',
+  'APSAUGA',
+  'BŪSTAS',
+  'BUSTAS',
+  'BŪSTO',
+  'BUSTO',
+  'CIVILINĖ',
+  'CIVILINE',
+  'ATSAKOMYBĖ',
+  'ATSAKOMYBE',
+  'SUMOKA',
+  'VISĄ',
+  'VISA',
+  'MOKĖTINA',
+  'MOKETINA',
+  'SWEDBANK',
+  'SEB',
+  'LUMINOR',
+  'CITADELE',
+  'BTA',
+  'ERGO',
+  'BALCIA',
+  'IF',
+  'COMPENSA',
+  'REGITRA',
+  'SURNAME',
+  'NAME',
+  'GIVEN',
+  'FIRST',
+  'LAST',
+  'COMPANY',
+  'INSURER',
+  'POLICYHOLDER',
+  'INSURED',
+  'OWNER',
+  'KEEPER',
+  'HOLDER',
+  'DRIVER',
+  'UAB',
+  'AB',
+  'MB',
+  'VŠĮ',
+  'VSI',
+  'IĮ',
+  'II',
+  'ARBA',
+  'ĮMONĖS',
+  'IMONES',
+  'PAVADINIMAS',
+  'REKVIZITAI',
+  'MARKĖ',
+  'MARKE',
+  'MODELIS',
+  'AUTOMOBILIS',
+  'AI',
+  'AK',
+  'ID',
+]);
+
+/**
+ * Normalizes a Lithuanian name (including ALL-CAPS and hyphenated names)
+ * into proper Lithuanian Title Case (e.g. "VAIDA MULERSKAITĖ-VACZYNSKA" -> "Vaida Mulerskaitė-Vaczynska").
+ */
+export function toLithuanianTitleCase(name: string): string {
+  if (!name) return '';
+  return name
+    .trim()
+    .replace(/\s*-\s*/g, '-')
+    .split(/\s+/)
+    .map((word) =>
+      word
+        .split('-')
+        .map((part) => {
+          if (!part) return '';
+          const first = part.charAt(0).toUpperCase();
+          const rest = part.slice(1).toLowerCase();
+          return first + rest;
+        })
+        .join('-')
+    )
+    .join(' ');
+}
+
+function isValidNameWord(word: string): boolean {
+  if (!word || word.length < 2) return false;
+  if (!/^[A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž]+(?:-[A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž]+)*$/.test(word)) return false;
+  const parts = word.split('-');
+  for (const p of parts) {
+    if (!p || p.length < 2) return false;
+    if (EXCLUDED_NAME_WORDS.has(p.toUpperCase())) return false;
+  }
+  return true;
+}
+
+export function isValidCandidateName(name: string): boolean {
+  if (!name) return false;
+  const trimmed = name.trim();
+  if (trimmed.length < 4) return false;
+  const lower = trimmed.toLowerCase();
+  for (const phrase of FALSE_POSITIVE_NAME_PHRASES) {
+    if (lower.includes(phrase)) return false;
+  }
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 3) return false;
+  return words.every(isValidNameWord);
+}
+
+function extractNameFromSegment(raw: string): string | null {
+  if (!raw) return null;
+  let cleaned = raw.trim();
+  for (const phrase of FALSE_POSITIVE_NAME_PHRASES) {
+    const reg = new RegExp(phrase, 'gi');
+    cleaned = cleaned.replace(reg, ' ');
+  }
+  cleaned = cleaned.replace(/\b\d{4}[-./]\d{2}[-./]\d{2}\b/g, ' ');
+  cleaned = cleaned.replace(/\b\d{11}\b/g, ' ');
+  cleaned = cleaned.replace(/\b[1-6]\d{10}\b/g, ' ');
+  cleaned = cleaned.replace(/[^\w\sĄČĘĖĮŠŲŪŽąčęėįšųūž-]/g, ' ');
+  cleaned = cleaned.replace(/\s*-\s*/g, '-');
+  const words = cleaned.split(/\s+/).filter(Boolean);
+
+  for (let len = Math.min(3, words.length); len >= 2; len--) {
+    for (let start = 0; start + len <= words.length; start++) {
+      const slice = words.slice(start, start + len);
+      if (slice.every(isValidNameWord)) {
+        const candidate = slice.join(' ');
+        if (isValidCandidateName(candidate)) {
+          return candidate;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function extractSingleNameWord(raw: string): string | null {
+  if (!raw) return null;
+  let cleaned = raw.trim();
+  for (const phrase of FALSE_POSITIVE_NAME_PHRASES) {
+    const reg = new RegExp(phrase, 'gi');
+    cleaned = cleaned.replace(reg, ' ');
+  }
+  cleaned = cleaned.replace(/[^\w\sĄČĘĖĮŠŲŪŽąčęėįšųūž-]/g, ' ');
+  cleaned = cleaned.replace(/\s*-\s*/g, '-');
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  for (const w of words) {
+    if (isValidNameWord(w)) {
+      return w;
+    }
+  }
+  return null;
+}
+
 /**
  * Extracts all Full Name (Vardas Pavardė) candidates.
  */
 export function extractFullNameCandidates(text: string): string[] {
   if (!text) return [];
   const candidates: string[] = [];
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const rawLines = text.split(/\r?\n/).map((l) => l.trim());
+  const lines = rawLines.filter(Boolean);
 
-  // 1. Check labeled name fields first
-  const nameLabelRegex =
-    /(?:vardas\s*,?\s*pavardė|klientas|savininkas|valdytojas|draudėjas|mokėtojas|pirkėjas|full\s*name|name)[:\s-]+([A-ZĄČĘĖĮŠŲŪŽ][a-ząčęėįšųūž]+(?:\s+[A-ZĄČĘĖĮŠŲŪŽ][a-ząčęėįšųūž-]+){1,2})/i;
+  interface RankedCandidate {
+    index: number;
+    name: string;
+  }
+  const rankedLabeled: RankedCandidate[] = [];
 
-  for (const line of lines) {
-    const match = line.match(nameLabelRegex);
-    if (match) {
-      addUniqueCandidate(candidates, match[1].replace(/\s+/g, ' ').trim());
+  const addRanked = (idx: number, name: string) => {
+    if (isValidCandidateName(name)) {
+      rankedLabeled.push({ index: idx, name: toLithuanianTitleCase(name) });
+    }
+  };
+
+  // 1. Separate "Vardas" & "Pavardė" in single row:
+  const singleRowPatterns = [
+    /(?:(?:2\.\s*)?vardas|\bgiven\s*names?)\s*[:\s-]+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+).*?(?:(?:1\.\s*)?pavardė|\bsurname)\s*[:\s-]+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+)/i,
+    /(?:(?:1\.\s*)?pavardė|\bsurname)\s*[:\s-]+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+).*?(?:(?:2\.\s*)?vardas|\bgiven\s*names?)\s*[:\s-]+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+)/i,
+    /C\.1\.1\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+).*?C\.1\.2\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+)/i,
+    /C\.1\.2\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+).*?C\.1\.1\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+)/i,
+    /C\.2\.1\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+).*?C\.2\.2\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+)/i,
+    /C\.2\.2\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+).*?C\.2\.1\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+)/i,
+  ];
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+    if (!line) continue;
+    const m1 = line.match(singleRowPatterns[0]);
+    if (m1 && isValidNameWord(m1[1]) && isValidNameWord(m1[2])) {
+      addRanked(i, `${m1[1]} ${m1[2]}`);
+    }
+    const m2 = line.match(singleRowPatterns[1]);
+    if (m2 && isValidNameWord(m2[1]) && isValidNameWord(m2[2])) {
+      addRanked(i, `${m2[2]} ${m2[1]}`);
+    }
+    const m3 = line.match(singleRowPatterns[2]);
+    if (m3 && isValidNameWord(m3[1]) && isValidNameWord(m3[2])) {
+      addRanked(i, `${m3[2]} ${m3[1]}`);
+    }
+    const m4 = line.match(singleRowPatterns[3]);
+    if (m4 && isValidNameWord(m4[1]) && isValidNameWord(m4[2])) {
+      addRanked(i, `${m4[1]} ${m4[2]}`);
+    }
+    const m5 = line.match(singleRowPatterns[4]);
+    if (m5 && isValidNameWord(m5[1]) && isValidNameWord(m5[2])) {
+      addRanked(i, `${m5[2]} ${m5[1]}`);
+    }
+    const m6 = line.match(singleRowPatterns[5]);
+    if (m6 && isValidNameWord(m6[1]) && isValidNameWord(m6[2])) {
+      addRanked(i, `${m6[1]} ${m6[2]}`);
     }
   }
 
-  // 2. Heuristic: Two capitalized words with Lithuanian personal name endings
-  const excludedWords = new Set([
-    'Lietuvos',
-    'Respublika',
-    'Vilnius',
-    'Kaunas',
-    'Klaipėda',
-    'Šiauliai',
-    'Panevėžys',
-    'Alytus',
-    'Vardas',
-    'Pavardė',
-    'Adresas',
-    'Telefonas',
-    'Galiojimas',
-    'Asmens',
-    'Kodas',
-    'Transporto',
-    'Priemonė',
-    'Valstybinis',
-    'Numeris',
-  ]);
+  // 2. Multi-line Regitra (C.1 and C.2)
+  for (const prefix of ['C\\.1', 'C\\.2']) {
+    let surname: string | null = null;
+    let firstName: string | null = null;
+    let surnameLine = -1;
+    let firstNameLine = -1;
 
-  const lithuanianNameRegex =
-    /\b([A-ZĄČĘĖĮŠŲŪŽ][a-ząčęėįšųūž]{2,18})\s+([A-ZĄČĘĖĮŠŲŪŽ][a-ząčęėįšųūž]{2,22}(?:-(?:[A-ZĄČĘĖĮŠŲŪŽ][a-ząčęėįšųūž]{2,20}))?)\b/g;
+    for (let i = 0; i < rawLines.length; i++) {
+      const line = rawLines[i];
+      if (new RegExp(`\\b${prefix}\\.1\\b`, 'i').test(line)) {
+        const rest = line.replace(new RegExp(`.*?\\b${prefix}\\.1\\b[:\\s-]*`, 'i'), '');
+        const w = extractSingleNameWord(rest);
+        if (w) {
+          surname = w;
+          surnameLine = i;
+        } else if (i + 1 < rawLines.length) {
+          const nextW = extractSingleNameWord(rawLines[i + 1]);
+          if (nextW) {
+            surname = nextW;
+            surnameLine = i;
+          }
+        }
+      }
+      if (new RegExp(`\\b${prefix}\\.2\\b`, 'i').test(line)) {
+        const rest = line.replace(new RegExp(`.*?\\b${prefix}\\.2\\b[:\\s-]*`, 'i'), '');
+        const w = extractSingleNameWord(rest);
+        if (w) {
+          firstName = w;
+          firstNameLine = i;
+        } else if (i + 1 < rawLines.length) {
+          const nextW = extractSingleNameWord(rawLines[i + 1]);
+          if (nextW) {
+            firstName = nextW;
+            firstNameLine = i;
+          }
+        }
+      }
+    }
+    if (firstName && surname) {
+      addRanked(Math.min(firstNameLine, surnameLine), `${firstName} ${surname}`);
+    }
+  }
+
+  // 3. Multi-line separate Vardas and Pavardė (1. Pavardė, 2. Vardas, or Driving License 1. X, 2. Y)
+  let separateFirstName: string | null = null;
+  let separateLastName: string | null = null;
+  let firstLine = -1;
+  let lastLine = -1;
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+    if (!line) continue;
+    // Skip if line has both or combined vardas, pavardė
+    if (/vardas/i.test(line) && /pavard[eė]/i.test(line)) continue;
+
+    // First name detection
+    if (
+      !separateFirstName &&
+      /(?:^|[\s,;/])(?:2\.\s*vardas|2\.\s+given|vardas(?![A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž])|given\s*name\b|first\s*name\b)/i.test(line)
+    ) {
+      const rest = line.replace(
+        /.*?(?:2\.\s*vardas|2\.\s+given|vardas(?![A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž])|given\s*name\b|first\s*name\b)[:\s-]*/i,
+        ''
+      );
+      const w = extractSingleNameWord(rest);
+      if (w) {
+        separateFirstName = w;
+        firstLine = i;
+      } else if (i + 1 < rawLines.length) {
+        const nextW = extractSingleNameWord(rawLines[i + 1]);
+        if (nextW) {
+          separateFirstName = nextW;
+          firstLine = i;
+        }
+      }
+    }
+
+    // Surname detection
+    if (
+      !separateLastName &&
+      /(?:^|[\s,;/])(?:1\.\s*pavard[eė]|1\.\s+surname|pavard[eė](?![A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž])|surname\b|last\s*name\b)/i.test(line)
+    ) {
+      const rest = line.replace(
+        /.*?(?:1\.\s*pavard[eė]|1\.\s+surname|pavard[eė](?![A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž])|surname\b|last\s*name\b)[:\s-]*/i,
+        ''
+      );
+      const w = extractSingleNameWord(rest);
+      if (w) {
+        separateLastName = w;
+        lastLine = i;
+      } else if (i + 1 < rawLines.length) {
+        const nextW = extractSingleNameWord(rawLines[i + 1]);
+        if (nextW) {
+          separateLastName = nextW;
+          lastLine = i;
+        }
+      }
+    }
+
+    // Driving license 1. Jonaitis / 2. Jonas
+    if (!separateLastName && /^1\.\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+)$/.test(line)) {
+      const m = line.match(/^1\.\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+)$/);
+      if (m && isValidNameWord(m[1])) {
+        separateLastName = m[1];
+        lastLine = i;
+      }
+    }
+    if (!separateFirstName && /^2\.\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+)$/.test(line)) {
+      const m = line.match(/^2\.\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž-]+)$/);
+      if (m && isValidNameWord(m[1])) {
+        separateFirstName = m[1];
+        firstLine = i;
+      }
+    }
+  }
+
+  if (separateFirstName && separateLastName) {
+    addRanked(Math.min(firstLine, lastLine), `${separateFirstName} ${separateLastName}`);
+  }
+
+  // 4. Full name labeled headers (combined or stacked layout)
+  const fullLabelRegex =
+    /(?:vardas\s*,?\s*pavard[eė]|klientas|savininkas|valdytojas|vairuotojas|naudotojas|draud[eė]jas|apdraustasis|mok[eė]tojas|pirk[eė]jas|full\s*name|policyholder|insurer|insured|driver)/i;
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+    if (!line) continue;
+    if (fullLabelRegex.test(line)) {
+      let sameLineValue = '';
+      if (line.includes(':')) {
+        sameLineValue = line.slice(line.indexOf(':') + 1).trim();
+      }
+      const sameLineCandidate = extractNameFromSegment(sameLineValue);
+      if (sameLineCandidate) {
+        addRanked(i, sameLineCandidate);
+      } else {
+        // Multi-line / stacked layout: check the next non-empty line
+        for (let j = i + 1; j < Math.min(rawLines.length, i + 4); j++) {
+          const nextLine = rawLines[j];
+          if (!nextLine) continue;
+          if (/(?:asmens\s+kodas|kodas|adresas|tel|valst|galioj|mark[eė])/i.test(nextLine)) {
+            break;
+          }
+          const nextLineCandidate = extractNameFromSegment(nextLine);
+          if (nextLineCandidate) {
+            addRanked(i, nextLineCandidate);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  rankedLabeled.sort((a, b) => a.index - b.index);
+  for (const item of rankedLabeled) {
+    addUniqueCandidate(candidates, item.name);
+  }
+
+  // 5. Fallback Heuristic: Capitalized or ALL-CAPS words with Lithuanian name suffixes
+  const lithuanianSuffixFirst = /(?:as|is|ys|us|a|ė|aitė|ytė|utė|ienė|uvienė)$/i;
+  const lithuanianSuffixLast =
+    /(?:as|is|ys|us|a|ė|aitė|ytė|utė|ienė|uvienė|onis|ėnas|ūnas|auskas|inskas|aitis|vicius|vičius|ska|skas|skytė|skaitė|ckas|ckytė|ckaitė)$/i;
 
   for (const line of lines) {
-    // Skip lines that look like addresses or vehicle models
-    if (/(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|al\.)(?=\s|,|$)|\\bLT-\d{5}\b)/i.test(line)) continue;
-    for (const match of line.matchAll(lithuanianNameRegex)) {
+    if (/\b(?:UAB|AB|VŠĮ|VSI|MB|IĮ|LTD|SIA|OÜ|BANKAS|LIZINGAS)\b/i.test(line)) continue;
+    if (/(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|al\.)(?=\s|,|$)|\bLT-\d{5}\b)/i.test(line)) continue;
+    if (/\b(?:VIN|kėbulo|kebulo|variklio|kategorija|masė|mase|sėdimų|sedimu|markė|marke|modelis|automobilis|transporto)\b/i.test(line)) continue;
+    if (CAR_MAKE_PATTERNS.some(({ wordBoundaryRegex }) => wordBoundaryRegex.test(line))) continue;
+
+    const nameMatchRegex =
+      /\b([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž]{2,18})\s+([A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž]{2,22}(?:-[A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž]{2,20})?)\b/g;
+
+    for (const match of line.matchAll(nameMatchRegex)) {
       const first = match[1];
       const last = match[2];
-      if (excludedWords.has(first) || excludedWords.has(last)) continue;
-      if (
-        /(?:as|is|ys|us|a|ė|aitė|ytė|utė|ienė|uvienė)$/i.test(first) &&
-        /(?:as|is|ys|us|a|ė|aitė|ytė|utė|ienė|uvienė|onis|ėnas|ūnas|auskas|inskas|aitis|vicius|vičius)$/i.test(
-          last
-        )
-      ) {
-        addUniqueCandidate(candidates, `${first} ${last}`);
+      if (isValidNameWord(first) && isValidNameWord(last)) {
+        if (lithuanianSuffixFirst.test(first) && lithuanianSuffixLast.test(last)) {
+          const candidate = `${first} ${last}`;
+          if (isValidCandidateName(candidate)) {
+            addUniqueCandidate(candidates, toLithuanianTitleCase(candidate));
+          }
+        }
       }
     }
   }

@@ -6,6 +6,7 @@ import App from '../App';
 import { db } from '../db/db';
 import {
   calculateAccuracyScore,
+  extractFullNameCandidates,
   extractLicensePlateCandidates,
   formatPhoneNumber,
   formatValidPeriod,
@@ -14,6 +15,7 @@ import {
   normalizeSingleDate,
   parseDocumentCandidates,
   parseDocumentText,
+  toLithuanianTitleCase,
 } from '../utils/parser';
 import * as ocrModule from '../utils/ocr';
 import {
@@ -121,6 +123,132 @@ describe('Parser, Accuracy Scoring & Multi-Candidate Utilities', () => {
     expect(candidates.address).toEqual(['Žirgų g. 12', 'Kauno g. 15', 'Ryto g. 13']);
     expect(candidates.fullName).toEqual(['Jonas Jonaitis', 'Petras Petraitis']);
     expect(candidates.phone).toEqual(['0-612-34567', '0-699-11223']);
+  });
+
+  it('normalizes ALL-CAPS, mixed-case, and hyphenated names into Lithuanian Title Case', () => {
+    expect(toLithuanianTitleCase('IRENA POCEVIČIENĖ')).toBe('Irena Pocevičienė');
+    expect(toLithuanianTitleCase('REMIGIJUS VYŠNIAUSKAS')).toBe('Remigijus Vyšniauskas');
+    expect(toLithuanianTitleCase('VAIDA MULERSKAITĖ-VACZYNSKA')).toBe(
+      'Vaida Mulerskaitė-Vaczynska'
+    );
+    expect(toLithuanianTitleCase('vaida mulerskaitė-vaczynska')).toBe(
+      'Vaida Mulerskaitė-Vaczynska'
+    );
+    expect(toLithuanianTitleCase('JONAS-VYTAUTAS JONAITIS')).toBe('Jonas-Vytautas Jonaitis');
+    expect(toLithuanianTitleCase('ĄŽUOLAS ŪSAS')).toBe('Ąžuolas Ūsas');
+  });
+
+  it('extracts full name from multi-line / stacked column layouts (header on line N, value on line N+1)', () => {
+    // Layout like "If" policy: stacked header with English translation, value on next line
+    const ifDoc = `
+      Vardas, pavardė arba įmonės pavadinimas / Name or Company Name
+      VAIDA MULERSKAITĖ-VACZYNSKA
+      Asmens kodas / Registration number
+      49012120000
+    `;
+    const ifParsed = parseDocumentText(ifDoc);
+    expect(ifParsed.fullName).toBe('Vaida Mulerskaitė-Vaczynska');
+
+    // Layout like "Balcia" policy
+    const balciaDoc = `
+      Draudėjas
+      IRENA POCEVIČIENĖ
+      Asmens kodas: 46711181234
+    `;
+    const balciaParsed = parseDocumentText(balciaDoc);
+    expect(balciaParsed.fullName).toBe('Irena Pocevičienė');
+
+    // Layout like "BTA" policy with colon on header line
+    const btaDoc = `
+      Draudėjas:
+      REMIGIJUS VYŠNIAUSKAS
+      Poliso Nr.: BTA-12345
+    `;
+    const btaParsed = parseDocumentText(btaDoc);
+    expect(btaParsed.fullName).toBe('Remigijus Vyšniauskas');
+  });
+
+  it('combines separate Vardas and Pavardė fields in single-row and column formats into standard Vardas Pavardė order', () => {
+    // Single row: Vardas then Pavardė
+    const singleRow1 = 'Vardas: Jonas Pavardė: Jonaitis';
+    expect(parseDocumentText(singleRow1).fullName).toBe('Jonas Jonaitis');
+
+    // Single row: Pavardė then Vardas
+    const singleRow2 = 'Pavardė: Jonaitis Vardas: Jonas';
+    expect(parseDocumentText(singleRow2).fullName).toBe('Jonas Jonaitis');
+
+    // Single row multilingual
+    const singleRow3 = 'Vardas / Given name: Jonas Pavardė / Surname: Jonaitis';
+    expect(parseDocumentText(singleRow3).fullName).toBe('Jonas Jonaitis');
+
+    // Multi-line column layout
+    const multiLine = `
+      1. Pavardė: Jonaitis
+      2. Vardas: Jonas
+    `;
+    expect(parseDocumentText(multiLine).fullName).toBe('Jonas Jonaitis');
+
+    // Multi-line reversed column layout
+    const multiLineReversed = `
+      Vardas: Jonas
+      Pavardė: Jonaitis
+    `;
+    expect(parseDocumentText(multiLineReversed).fullName).toBe('Jonas Jonaitis');
+  });
+
+  it('extracts and formats names from Regitra certificates and driving license numbering', () => {
+    // Regitra vehicle registration certificate (C.1.1 Surname, C.1.2 Given name)
+    const regitraDoc = `
+      C.1.1 Jonaitis
+      C.1.2 Jonas
+      C.1.3 Vilniaus g. 10
+    `;
+    expect(parseDocumentText(regitraDoc).fullName).toBe('Jonas Jonaitis');
+
+    // Regitra certificate on single row with ALL CAPS
+    const regitraSingleRow = 'C.1.1 JONAITIS C.1.2 JONAS';
+    expect(parseDocumentText(regitraSingleRow).fullName).toBe('Jonas Jonaitis');
+
+    // Driving license EU standard numbering (1. Surname, 2. Given name)
+    const licenseDoc = `
+      1. Pavardė / Surname
+      JONAITIS
+      2. Vardas / Given name
+      JONAS
+      3. 1980.01.01 Vilnius
+    `;
+    expect(parseDocumentText(licenseDoc).fullName).toBe('Jonas Jonaitis');
+
+    // Driving license compact numbering without labels
+    const compactLicense = `
+      1. JONAITIS
+      2. JONAS
+      3. 1985-05-15
+    `;
+    expect(parseDocumentText(compactLicense).fullName).toBe('Jonas Jonaitis');
+  });
+
+  it('handles compound headers with multiple fields and extracts cleanly', () => {
+    const compoundDoc = 'Vardas, Pavardė, Gimimo data: IRENA POCEVIČIENĖ, 1967-11-18';
+    expect(parseDocumentText(compoundDoc).fullName).toBe('Irena Pocevičienė');
+  });
+
+  it('rejects document boilerplate and false-positive phrases from name extraction', () => {
+    const boilerplateDocs = [
+      'Vardas, pavardė arba įmonės pavadinimas / Name or Company Name',
+      'Būsto draudimas',
+      'Butas Apsauga',
+      'sumoka visą',
+      'mokėtina suma',
+      'Swedbank lizingas',
+      'Civilinė atsakomybė',
+      'UAB Švarus Pasaulis',
+    ];
+
+    for (const doc of boilerplateDocs) {
+      const candidates = extractFullNameCandidates(doc);
+      expect(candidates).toEqual([]);
+    }
   });
 });
 
