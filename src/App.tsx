@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ScanText,
   Table2,
@@ -21,8 +21,17 @@ import {
   MapPin,
   LayoutGrid,
   LayoutList,
+  Layers,
+  FileImage,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  ArrowUpDown,
+  Square,
+  AlertCircle,
+  CheckCircle2,
 } from 'lucide-react';
-import { db, type TableRecord } from './db/db';
+import { db, type StagingRecord, type TableRecord } from './db/db';
 import { translations, type Language } from './i18n/translations';
 import {
   addOneYearToDate,
@@ -38,7 +47,7 @@ import {
 import { extractTextAndConfidenceFromImageFile } from './utils/ocr';
 import { exportToCsv, exportToJson, exportToXlsx } from './utils/export';
 
-type Tab = 'table' | 'import' | 'settings';
+type Tab = 'table' | 'import' | 'bulk' | 'settings';
 type ViewMode = 'table' | 'cards';
 
 const EMPTY_FORM: ParsedDocumentFields = {
@@ -60,6 +69,16 @@ const EMPTY_CANDIDATES: ParsedDocumentCandidates = {
   validPeriod: [],
   personalCode: [],
 };
+
+const FORM_FIELD_KEYS: Array<keyof ParsedDocumentFields> = [
+  'fullName',
+  'personalCode',
+  'phone',
+  'address',
+  'licensePlate',
+  'carModel',
+  'validPeriod',
+];
 
 function getValidityStatus(validPeriod: string): 'active' | 'expiring' | 'expired' | 'none' {
   const [, end] = splitValidPeriod(validPeriod);
@@ -97,6 +116,7 @@ export default function App() {
   });
 
   const [records, setRecords] = useState<TableRecord[]>([]);
+  const [stagingRecords, setStagingRecords] = useState<StagingRecord[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
 
   // Modal state for manual Add / Edit
@@ -113,6 +133,21 @@ export default function App() {
   const [isProcessingOcr, setIsProcessingOcr] = useState(false);
   const [ocrProgress, setOcrProgress] = useState(0);
   const [lastScannedFileName, setLastScannedFileName] = useState('');
+
+  // Bulk Import & Sequential Staging Verification state (Zero image persistence)
+  const [isBatchProcessing, setIsBatchProcessing] = useState(false);
+  const [batchCurrentIndex, setBatchCurrentIndex] = useState(0);
+  const [batchTotalCount, setBatchTotalCount] = useState(0);
+  const [batchCurrentFileName, setBatchCurrentFileName] = useState('');
+  const [batchFileProgress, setBatchFileProgress] = useState(0);
+  const stopBatchRef = useRef(false);
+
+  const [stagingSortLowestFirst, setStagingSortLowestFirst] = useState(false);
+  const [activeStagingIndex, setActiveStagingIndex] = useState(0);
+  const [stagingEditFields, setStagingEditFields] = useState<ParsedDocumentFields>(EMPTY_FORM);
+  const [stagingEditCandidates, setStagingEditCandidates] =
+    useState<ParsedDocumentCandidates>(EMPTY_CANDIDATES);
+  const [stagingEditRawText, setStagingEditRawText] = useState('');
 
   const t = translations[lang];
 
@@ -137,8 +172,14 @@ export default function App() {
     setRecords(items);
   };
 
+  const loadStagingRecords = async () => {
+    const items = await db.stagingRecords.orderBy('id').toArray();
+    setStagingRecords(items);
+  };
+
   useEffect(() => {
     void loadRecords();
+    void loadStagingRecords();
   }, []);
 
   const toggleTheme = () => {
@@ -154,6 +195,7 @@ export default function App() {
     if (!q) return records;
     return records.filter((r) =>
       [
+        r.imageName || '',
         r.fullName,
         r.address,
         r.phone,
@@ -167,6 +209,52 @@ export default function App() {
         .includes(q)
     );
   }, [records, searchQuery]);
+
+  const sortedStagingRecords = useMemo(() => {
+    const copy = [...stagingRecords];
+    if (stagingSortLowestFirst) {
+      copy.sort((a, b) => a.accuracyScore - b.accuracyScore || (a.id ?? 0) - (b.id ?? 0));
+    }
+    return copy;
+  }, [stagingRecords, stagingSortLowestFirst]);
+
+  const clampedStagingIndex =
+    sortedStagingRecords.length === 0
+      ? 0
+      : Math.min(activeStagingIndex, sortedStagingRecords.length - 1);
+
+  const currentStagingRecord: StagingRecord | undefined =
+    sortedStagingRecords[clampedStagingIndex];
+
+  useEffect(() => {
+    if (!currentStagingRecord) {
+      setStagingEditFields(EMPTY_FORM);
+      setStagingEditCandidates(EMPTY_CANDIDATES);
+      setStagingEditRawText('');
+      return;
+    }
+    setStagingEditFields({
+      fullName: currentStagingRecord.fullName,
+      address: currentStagingRecord.address,
+      phone: currentStagingRecord.phone,
+      licensePlate: currentStagingRecord.licensePlate,
+      carModel: currentStagingRecord.carModel,
+      validPeriod: currentStagingRecord.validPeriod,
+      personalCode: currentStagingRecord.personalCode,
+    });
+    setStagingEditCandidates(currentStagingRecord.candidates ?? EMPTY_CANDIDATES);
+    setStagingEditRawText(currentStagingRecord.rawText ?? '');
+  }, [
+    currentStagingRecord?.id,
+    currentStagingRecord?.fullName,
+    currentStagingRecord?.address,
+    currentStagingRecord?.phone,
+    currentStagingRecord?.licensePlate,
+    currentStagingRecord?.carModel,
+    currentStagingRecord?.validPeriod,
+    currentStagingRecord?.personalCode,
+    currentStagingRecord?.rawText,
+  ]);
 
   const openNewRecordModal = () => {
     setEditingId(null);
@@ -231,6 +319,7 @@ export default function App() {
     const now = new Date().toISOString();
     const accuracyScore = rec.accuracyScore ?? calculateAccuracyScore(rec);
     await db.records.add({
+      imageName: rec.imageName,
       fullName: rec.fullName,
       address: rec.address,
       phone: rec.phone,
@@ -257,7 +346,7 @@ export default function App() {
     await loadRecords();
   };
 
-  // Image upload for local OCR (transient memory only, never stored)
+  // Single image upload for local OCR (transient memory only, never stored)
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     // Reset file input immediately so the File reference is not retained on the DOM element
@@ -284,6 +373,152 @@ export default function App() {
     }
   };
 
+  // Sequential Bulk Photo Upload -> Staging Queue (Zero photo persistence)
+  const handleBulkPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files ? Array.from(e.target.files) : [];
+    // Immediately clear file input so File references are never retained on the DOM element
+    e.target.value = '';
+    if (fileList.length === 0) return;
+
+    stopBatchRef.current = false;
+    setIsBatchProcessing(true);
+    setBatchTotalCount(fileList.length);
+
+    try {
+      for (let i = 0; i < fileList.length; i++) {
+        if (stopBatchRef.current) break;
+        const file = fileList[i];
+        setBatchCurrentIndex(i + 1);
+        setBatchCurrentFileName(file.name);
+        setBatchFileProgress(5);
+
+        const { text, confidence } = await extractTextAndConfidenceFromImageFile(file, (p) =>
+          setBatchFileProgress(p)
+        );
+        const candidates = parseDocumentCandidates(text);
+        const parsed = parseDocumentText(text);
+        const normalized = normalizeRecordFields(parsed);
+        const accuracyScore = calculateAccuracyScore(normalized, confidence);
+        const now = new Date().toISOString();
+
+        await db.stagingRecords.add({
+          imageName: file.name,
+          ...normalized,
+          accuracyScore,
+          rawText: text,
+          candidates,
+          createdAt: now,
+          updatedAt: now,
+        });
+
+        await loadStagingRecords();
+      }
+    } finally {
+      setIsBatchProcessing(false);
+      setBatchCurrentIndex(0);
+      setBatchTotalCount(0);
+      setBatchCurrentFileName('');
+      setBatchFileProgress(0);
+      stopBatchRef.current = false;
+    }
+  };
+
+  const handleStagingFieldsChange: React.Dispatch<React.SetStateAction<ParsedDocumentFields>> = (
+    updater
+  ) => {
+    setStagingEditFields((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      if (currentStagingRecord?.id !== undefined) {
+        const normalized = normalizeRecordFields(next);
+        const nextScore = calculateAccuracyScore(normalized);
+        const now = new Date().toISOString();
+        void db.stagingRecords
+          .update(currentStagingRecord.id, {
+            ...next,
+            accuracyScore: nextScore,
+            updatedAt: now,
+          })
+          .then(() => loadStagingRecords());
+      }
+      return next;
+    });
+  };
+
+  const handleStagingRawTextChange = (text: string) => {
+    setStagingEditRawText(text);
+    const candidates = parseDocumentCandidates(text);
+    const parsed = parseDocumentText(text);
+    setStagingEditCandidates(candidates);
+    setStagingEditFields(parsed);
+    if (currentStagingRecord?.id !== undefined) {
+      const normalized = normalizeRecordFields(parsed);
+      const nextScore = calculateAccuracyScore(normalized);
+      const now = new Date().toISOString();
+      void db.stagingRecords
+        .update(currentStagingRecord.id, {
+          ...parsed,
+          rawText: text,
+          candidates,
+          accuracyScore: nextScore,
+          updatedAt: now,
+        })
+        .then(() => loadStagingRecords());
+    }
+  };
+
+  const handleApproveCurrentStaging = async () => {
+    if (!currentStagingRecord || currentStagingRecord.id === undefined) return;
+    const normalized = normalizeRecordFields(stagingEditFields);
+    const accuracyScore = calculateAccuracyScore(normalized);
+    const now = new Date().toISOString();
+
+    await db.records.add({
+      imageName: currentStagingRecord.imageName,
+      ...normalized,
+      accuracyScore,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.stagingRecords.delete(currentStagingRecord.id);
+    await Promise.all([loadRecords(), loadStagingRecords()]);
+  };
+
+  const handleApproveStagingRow = async (item: StagingRecord) => {
+    if (item.id === undefined) return;
+    // If approving the currently edited item, use the live edited fields
+    const sourceFields: ParsedDocumentFields =
+      currentStagingRecord?.id === item.id
+        ? stagingEditFields
+        : {
+            fullName: item.fullName,
+            address: item.address,
+            phone: item.phone,
+            licensePlate: item.licensePlate,
+            carModel: item.carModel,
+            validPeriod: item.validPeriod,
+            personalCode: item.personalCode,
+          };
+    const normalized = normalizeRecordFields(sourceFields);
+    const accuracyScore = calculateAccuracyScore(normalized);
+    const now = new Date().toISOString();
+
+    await db.records.add({
+      imageName: item.imageName,
+      ...normalized,
+      accuracyScore,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.stagingRecords.delete(item.id);
+    await Promise.all([loadRecords(), loadStagingRecords()]);
+  };
+
+  const handleRejectStagingRow = async (id?: number) => {
+    if (id === undefined) return;
+    await db.stagingRecords.delete(id);
+    await loadStagingRecords();
+  };
+
   const handleRawTextChange = (text: string) => {
     setRawOcrText(text);
     setImportOcrConfidence(undefined);
@@ -302,6 +537,7 @@ export default function App() {
     const accuracyScore = calculateAccuracyScore(normalized, importOcrConfidence);
     const now = new Date().toISOString();
     await db.records.add({
+      imageName: lastScannedFileName || undefined,
       ...normalized,
       accuracyScore,
       createdAt: now,
@@ -318,7 +554,7 @@ export default function App() {
     setActiveTab('table');
   };
 
-  const handleAddOneYear = (target: 'modal' | 'import', currentPeriod: string) => {
+  const handleAddOneYear = (target: 'modal' | 'import' | 'staging', currentPeriod: string) => {
     const [start] = splitValidPeriod(currentPeriod);
     const baseStart =
       start && /^\d{4}-\d{2}-\d{2}$/.test(start)
@@ -328,6 +564,8 @@ export default function App() {
     const updated = `${baseStart} ${nextYear}`;
     if (target === 'modal') {
       setFormFields((prev) => ({ ...prev, validPeriod: updated }));
+    } else if (target === 'staging') {
+      handleStagingFieldsChange((prev) => ({ ...prev, validPeriod: updated }));
     } else {
       setImportFields((prev) => ({ ...prev, validPeriod: updated }));
     }
@@ -375,7 +613,7 @@ export default function App() {
   const renderRecordFieldsEditor = (
     values: ParsedDocumentFields,
     onChange: React.Dispatch<React.SetStateAction<ParsedDocumentFields>>,
-    target: 'modal' | 'import',
+    target: 'modal' | 'import' | 'staging',
     idPrefix: string,
     candidates?: ParsedDocumentCandidates
   ) => {
@@ -391,205 +629,306 @@ export default function App() {
       onChange((prev) => ({ ...prev, validPeriod: combined }));
     };
 
+    const emptyFieldKeys = FORM_FIELD_KEYS.filter((k) => values[k].trim().length === 0);
+
+    const getInputBorderClasses = (val: string) =>
+      val.trim().length === 0
+        ? 'border-rose-400/80 dark:border-rose-500/60 bg-rose-50/40 dark:bg-rose-950/20 focus:ring-rose-500'
+        : 'border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 focus:ring-indigo-500';
+
+    const renderFieldStatusBadge = (fieldKey: keyof ParsedDocumentFields, val: string) =>
+      val.trim().length === 0 ? (
+        <span
+          data-testid={`${idPrefix}-empty-badge-${fieldKey}`}
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/25"
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" />
+          <span>{t.labels.emptyFieldBadge}</span>
+        </span>
+      ) : (
+        <CheckCircle2
+          aria-hidden="true"
+          className="w-3.5 h-3.5 text-emerald-500 shrink-0"
+        />
+      );
+
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {/* Vardas Pavardė */}
-        <div className="sm:col-span-2">
-          <label
-            htmlFor={`${idPrefix}-fullName`}
-            className="block text-xs font-medium text-slate-700 dark:text-zinc-300 mb-1"
+      <div className="space-y-3">
+        {/* Interactive Empty Columns Notice Banner */}
+        {emptyFieldKeys.length > 0 ? (
+          <div
+            data-testid={`${idPrefix}-empty-columns-notice`}
+            className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 space-y-1.5"
           >
-            {t.columns.fullName}
-          </label>
-          <input
-            id={`${idPrefix}-fullName`}
-            type="text"
-            value={values.fullName}
-            onChange={(e) => onChange((prev) => ({ ...prev, fullName: e.target.value }))}
-            placeholder={t.placeholders.fullName}
-            className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          {renderCandidateChips('fullName', values.fullName, candidates, (val) =>
-            onChange((prev) => ({ ...prev, fullName: val }))
-          )}
-        </div>
-
-        {/* Asmens kodas */}
-        <div>
-          <label
-            htmlFor={`${idPrefix}-personalCode`}
-            className="block text-xs font-medium text-slate-700 dark:text-zinc-300 mb-1"
-          >
-            {t.columns.personalCode}
-          </label>
-          <input
-            id={`${idPrefix}-personalCode`}
-            type="text"
-            inputMode="numeric"
-            maxLength={11}
-            value={values.personalCode}
-            onChange={(e) =>
-              onChange((prev) => ({
-                ...prev,
-                personalCode: e.target.value.replace(/\D/g, '').slice(0, 11),
-              }))
-            }
-            placeholder={t.placeholders.personalCode}
-            className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          {renderCandidateChips('personalCode', values.personalCode, candidates, (val) =>
-            onChange((prev) => ({ ...prev, personalCode: val }))
-          )}
-        </div>
-
-        {/* Telefonas */}
-        <div>
-          <label
-            htmlFor={`${idPrefix}-phone`}
-            className="block text-xs font-medium text-slate-700 dark:text-zinc-300 mb-1"
-          >
-            {t.columns.phone} <span className="text-[11px] text-slate-400">(0-6XX-XXXXX)</span>
-          </label>
-          <input
-            id={`${idPrefix}-phone`}
-            type="tel"
-            value={values.phone}
-            onChange={(e) => onChange((prev) => ({ ...prev, phone: e.target.value }))}
-            onBlur={(e) =>
-              onChange((prev) => ({ ...prev, phone: formatPhoneNumber(e.target.value) }))
-            }
-            placeholder={t.placeholders.phone}
-            className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          {renderCandidateChips('phone', values.phone, candidates, (val) =>
-            onChange((prev) => ({ ...prev, phone: formatPhoneNumber(val) }))
-          )}
-        </div>
-
-        {/* Adresas */}
-        <div className="sm:col-span-2">
-          <label
-            htmlFor={`${idPrefix}-address`}
-            className="block text-xs font-medium text-slate-700 dark:text-zinc-300 mb-1"
-          >
-            {t.columns.address}
-          </label>
-          <input
-            id={`${idPrefix}-address`}
-            type="text"
-            value={values.address}
-            onChange={(e) => onChange((prev) => ({ ...prev, address: e.target.value }))}
-            placeholder={t.placeholders.address}
-            className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          {renderCandidateChips('address', values.address, candidates, (val) =>
-            onChange((prev) => ({ ...prev, address: val }))
-          )}
-        </div>
-
-        {/* Valst. Nr. */}
-        <div>
-          <label
-            htmlFor={`${idPrefix}-licensePlate`}
-            className="block text-xs font-medium text-slate-700 dark:text-zinc-300 mb-1"
-          >
-            {t.columns.licensePlate}
-          </label>
-          <input
-            id={`${idPrefix}-licensePlate`}
-            type="text"
-            value={values.licensePlate}
-            onChange={(e) =>
-              onChange((prev) => ({ ...prev, licensePlate: e.target.value.toUpperCase() }))
-            }
-            placeholder={t.placeholders.licensePlate}
-            className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          {renderCandidateChips('licensePlate', values.licensePlate, candidates, (val) =>
-            onChange((prev) => ({ ...prev, licensePlate: val.toUpperCase() }))
-          )}
-        </div>
-
-        {/* Modelis */}
-        <div>
-          <label
-            htmlFor={`${idPrefix}-carModel`}
-            className="block text-xs font-medium text-slate-700 dark:text-zinc-300 mb-1"
-          >
-            {t.columns.carModel}
-          </label>
-          <input
-            id={`${idPrefix}-carModel`}
-            type="text"
-            value={values.carModel}
-            onChange={(e) =>
-              onChange((prev) => ({ ...prev, carModel: e.target.value.toUpperCase() }))
-            }
-            placeholder={t.placeholders.carModel}
-            className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          {renderCandidateChips('carModel', values.carModel, candidates, (val) =>
-            onChange((prev) => ({ ...prev, carModel: val.toUpperCase() }))
-          )}
-        </div>
-
-        {/* Galiojimas (YYYY-MM-DD YYYY-MM-DD) */}
-        <div className="sm:col-span-2 space-y-2">
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor={`${idPrefix}-validPeriod`}
-              className="block text-xs font-medium text-slate-700 dark:text-zinc-300"
-            >
-              {t.columns.validPeriod}{' '}
-              <span className="text-[11px] text-slate-400">(YYYY-MM-DD YYYY-MM-DD)</span>
-            </label>
-            <button
-              type="button"
-              onClick={() => handleAddOneYear(target, values.validPeriod)}
-              className="touch-press text-[11px] font-medium px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20"
-            >
-              {t.actions.addOneYear}
-            </button>
-          </div>
-          <input
-            id={`${idPrefix}-validPeriod`}
-            type="text"
-            value={values.validPeriod}
-            onChange={(e) => onChange((prev) => ({ ...prev, validPeriod: e.target.value }))}
-            onBlur={(e) =>
-              onChange((prev) => ({
-                ...prev,
-                validPeriod: formatValidPeriod(e.target.value),
-              }))
-            }
-            placeholder={t.placeholders.validPeriod}
-            className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          {renderCandidateChips('validPeriod', values.validPeriod, candidates, (val) =>
-            onChange((prev) => ({ ...prev, validPeriod: formatValidPeriod(val) }))
-          )}
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <span className="block text-[10px] text-slate-400 mb-0.5">
-                {t.labels.startDate}
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-rose-700 dark:text-rose-300">
+              <AlertCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+              <span>
+                {t.labels.emptyFieldsSummary.replace('{count}', String(emptyFieldKeys.length))}
               </span>
-              <input
-                type="date"
-                aria-label={t.labels.startDate}
-                value={/^\d{4}-\d{2}-\d{2}$/.test(startDate) ? startDate : ''}
-                onChange={(e) => updateDatePart('start', e.target.value)}
-                className="w-full rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-2.5 py-1.5 text-xs font-mono"
-              />
             </div>
-            <div>
-              <span className="block text-[10px] text-slate-400 mb-0.5">{t.labels.endDate}</span>
-              <input
-                type="date"
-                aria-label={t.labels.endDate}
-                value={/^\d{4}-\d{2}-\d{2}$/.test(endDate) ? endDate : ''}
-                onChange={(e) => updateDatePart('end', e.target.value)}
-                className="w-full rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-2.5 py-1.5 text-xs font-mono"
-              />
+            <div className="flex flex-wrap items-center gap-1.5">
+              {emptyFieldKeys.map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  data-testid={`${idPrefix}-jump-empty-${key}`}
+                  onClick={() => {
+                    const el = document.getElementById(`${idPrefix}-${key}`);
+                    el?.focus();
+                  }}
+                  className="touch-press inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-medium bg-white/90 dark:bg-zinc-900/90 text-rose-700 dark:text-rose-300 border border-rose-500/30 hover:bg-rose-500/20 transition-colors"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                  <span>{t.columns[key]}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div
+            data-testid={`${idPrefix}-all-columns-filled`}
+            className="flex items-center gap-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300"
+          >
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+            <span>{t.labels.allFieldsFilled}</span>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Vardas Pavardė */}
+          <div className="sm:col-span-2">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label
+                htmlFor={`${idPrefix}-fullName`}
+                className="block text-xs font-medium text-slate-700 dark:text-zinc-300"
+              >
+                {t.columns.fullName}
+              </label>
+              {renderFieldStatusBadge('fullName', values.fullName)}
+            </div>
+            <input
+              id={`${idPrefix}-fullName`}
+              type="text"
+              value={values.fullName}
+              onChange={(e) => onChange((prev) => ({ ...prev, fullName: e.target.value }))}
+              placeholder={t.placeholders.fullName}
+              className={`w-full rounded-xl border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2 ${getInputBorderClasses(
+                values.fullName
+              )}`}
+            />
+            {renderCandidateChips('fullName', values.fullName, candidates, (val) =>
+              onChange((prev) => ({ ...prev, fullName: val }))
+            )}
+          </div>
+
+          {/* Asmens kodas */}
+          <div>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label
+                htmlFor={`${idPrefix}-personalCode`}
+                className="block text-xs font-medium text-slate-700 dark:text-zinc-300"
+              >
+                {t.columns.personalCode}
+              </label>
+              {renderFieldStatusBadge('personalCode', values.personalCode)}
+            </div>
+            <input
+              id={`${idPrefix}-personalCode`}
+              type="text"
+              inputMode="numeric"
+              maxLength={11}
+              value={values.personalCode}
+              onChange={(e) =>
+                onChange((prev) => ({
+                  ...prev,
+                  personalCode: e.target.value.replace(/\D/g, '').slice(0, 11),
+                }))
+              }
+              placeholder={t.placeholders.personalCode}
+              className={`w-full rounded-xl border px-3 py-2 text-sm font-mono transition-colors focus:outline-none focus:ring-2 ${getInputBorderClasses(
+                values.personalCode
+              )}`}
+            />
+            {renderCandidateChips('personalCode', values.personalCode, candidates, (val) =>
+              onChange((prev) => ({ ...prev, personalCode: val }))
+            )}
+          </div>
+
+          {/* Telefonas */}
+          <div>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label
+                htmlFor={`${idPrefix}-phone`}
+                className="block text-xs font-medium text-slate-700 dark:text-zinc-300"
+              >
+                {t.columns.phone}{' '}
+                <span className="text-[11px] text-slate-400">(0-6XX-XXXXX)</span>
+              </label>
+              {renderFieldStatusBadge('phone', values.phone)}
+            </div>
+            <input
+              id={`${idPrefix}-phone`}
+              type="tel"
+              value={values.phone}
+              onChange={(e) => onChange((prev) => ({ ...prev, phone: e.target.value }))}
+              onBlur={(e) =>
+                onChange((prev) => ({ ...prev, phone: formatPhoneNumber(e.target.value) }))
+              }
+              placeholder={t.placeholders.phone}
+              className={`w-full rounded-xl border px-3 py-2 text-sm font-mono transition-colors focus:outline-none focus:ring-2 ${getInputBorderClasses(
+                values.phone
+              )}`}
+            />
+            {renderCandidateChips('phone', values.phone, candidates, (val) =>
+              onChange((prev) => ({ ...prev, phone: formatPhoneNumber(val) }))
+            )}
+          </div>
+
+          {/* Adresas */}
+          <div className="sm:col-span-2">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label
+                htmlFor={`${idPrefix}-address`}
+                className="block text-xs font-medium text-slate-700 dark:text-zinc-300"
+              >
+                {t.columns.address}
+              </label>
+              {renderFieldStatusBadge('address', values.address)}
+            </div>
+            <input
+              id={`${idPrefix}-address`}
+              type="text"
+              value={values.address}
+              onChange={(e) => onChange((prev) => ({ ...prev, address: e.target.value }))}
+              placeholder={t.placeholders.address}
+              className={`w-full rounded-xl border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2 ${getInputBorderClasses(
+                values.address
+              )}`}
+            />
+            {renderCandidateChips('address', values.address, candidates, (val) =>
+              onChange((prev) => ({ ...prev, address: val }))
+            )}
+          </div>
+
+          {/* Valst. Nr. */}
+          <div>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label
+                htmlFor={`${idPrefix}-licensePlate`}
+                className="block text-xs font-medium text-slate-700 dark:text-zinc-300"
+              >
+                {t.columns.licensePlate}
+              </label>
+              {renderFieldStatusBadge('licensePlate', values.licensePlate)}
+            </div>
+            <input
+              id={`${idPrefix}-licensePlate`}
+              type="text"
+              value={values.licensePlate}
+              onChange={(e) =>
+                onChange((prev) => ({ ...prev, licensePlate: e.target.value.toUpperCase() }))
+              }
+              placeholder={t.placeholders.licensePlate}
+              className={`w-full rounded-xl border px-3 py-2 text-sm font-mono uppercase transition-colors focus:outline-none focus:ring-2 ${getInputBorderClasses(
+                values.licensePlate
+              )}`}
+            />
+            {renderCandidateChips('licensePlate', values.licensePlate, candidates, (val) =>
+              onChange((prev) => ({ ...prev, licensePlate: val.toUpperCase() }))
+            )}
+          </div>
+
+          {/* Modelis */}
+          <div>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label
+                htmlFor={`${idPrefix}-carModel`}
+                className="block text-xs font-medium text-slate-700 dark:text-zinc-300"
+              >
+                {t.columns.carModel}
+              </label>
+              {renderFieldStatusBadge('carModel', values.carModel)}
+            </div>
+            <input
+              id={`${idPrefix}-carModel`}
+              type="text"
+              value={values.carModel}
+              onChange={(e) =>
+                onChange((prev) => ({ ...prev, carModel: e.target.value.toUpperCase() }))
+              }
+              placeholder={t.placeholders.carModel}
+              className={`w-full rounded-xl border px-3 py-2 text-sm uppercase transition-colors focus:outline-none focus:ring-2 ${getInputBorderClasses(
+                values.carModel
+              )}`}
+            />
+            {renderCandidateChips('carModel', values.carModel, candidates, (val) =>
+              onChange((prev) => ({ ...prev, carModel: val.toUpperCase() }))
+            )}
+          </div>
+
+          {/* Galiojimas (YYYY-MM-DD YYYY-MM-DD) */}
+          <div className="sm:col-span-2 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <label
+                  htmlFor={`${idPrefix}-validPeriod`}
+                  className="block text-xs font-medium text-slate-700 dark:text-zinc-300"
+                >
+                  {t.columns.validPeriod}{' '}
+                  <span className="text-[11px] text-slate-400">(YYYY-MM-DD YYYY-MM-DD)</span>
+                </label>
+                {renderFieldStatusBadge('validPeriod', values.validPeriod)}
+              </div>
+              <button
+                type="button"
+                onClick={() => handleAddOneYear(target, values.validPeriod)}
+                className="touch-press text-[11px] font-medium px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20"
+              >
+                {t.actions.addOneYear}
+              </button>
+            </div>
+            <input
+              id={`${idPrefix}-validPeriod`}
+              type="text"
+              value={values.validPeriod}
+              onChange={(e) => onChange((prev) => ({ ...prev, validPeriod: e.target.value }))}
+              onBlur={(e) =>
+                onChange((prev) => ({
+                  ...prev,
+                  validPeriod: formatValidPeriod(e.target.value),
+                }))
+              }
+              placeholder={t.placeholders.validPeriod}
+              className={`w-full rounded-xl border px-3 py-2 text-sm font-mono transition-colors focus:outline-none focus:ring-2 ${getInputBorderClasses(
+                values.validPeriod
+              )}`}
+            />
+            {renderCandidateChips('validPeriod', values.validPeriod, candidates, (val) =>
+              onChange((prev) => ({ ...prev, validPeriod: formatValidPeriod(val) }))
+            )}
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <span className="block text-[10px] text-slate-400 mb-0.5">
+                  {t.labels.startDate}
+                </span>
+                <input
+                  type="date"
+                  aria-label={t.labels.startDate}
+                  value={/^\d{4}-\d{2}-\d{2}$/.test(startDate) ? startDate : ''}
+                  onChange={(e) => updateDatePart('start', e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-2.5 py-1.5 text-xs font-mono"
+                />
+              </div>
+              <div>
+                <span className="block text-[10px] text-slate-400 mb-0.5">{t.labels.endDate}</span>
+                <input
+                  type="date"
+                  aria-label={t.labels.endDate}
+                  value={/^\d{4}-\d{2}-\d{2}$/.test(endDate) ? endDate : ''}
+                  onChange={(e) => updateDatePart('end', e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-2.5 py-1.5 text-xs font-mono"
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -602,6 +941,7 @@ export default function App() {
     importOcrConfidence
   );
   const liveModalScore = calculateAccuracyScore(normalizeRecordFields(formFields));
+  const liveStagingScore = calculateAccuracyScore(normalizeRecordFields(stagingEditFields));
 
   return (
     <div className="min-h-dvh w-full max-w-full flex flex-col bg-slate-50 dark:bg-zinc-950 text-slate-900 dark:text-zinc-50 transition-colors overflow-x-hidden">
@@ -996,9 +1336,17 @@ export default function App() {
                 <span>{t.labels.privacyBadge}</span>
               </div>
 
-              {/* Camera / Photo Upload Dropzone */}
-              <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-200 dark:border-zinc-800 rounded-xl p-5 cursor-pointer hover:border-indigo-500/60 transition-colors bg-slate-50/60 dark:bg-zinc-950/40 text-center">
-                <Upload className="w-6 h-6 text-indigo-500 mb-1.5" />
+              {/* Camera / Photo Upload Dropzone with Social-Style Center + Button */}
+              <label
+                data-testid="single-image-import-dropzone"
+                className="group flex flex-col items-center justify-center border-2 border-dashed border-slate-200 dark:border-zinc-800 rounded-2xl p-6 cursor-pointer hover:border-indigo-500/70 transition-all bg-slate-50/60 dark:bg-zinc-950/40 text-center"
+              >
+                <div
+                  data-testid="single-image-plus-icon"
+                  className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 text-white shadow-lg shadow-indigo-500/30 flex items-center justify-center mb-2.5 group-hover:scale-105 transition-transform"
+                >
+                  <Plus className="w-7 h-7 stroke-[2.75]" />
+                </div>
                 <span className="text-xs font-semibold text-slate-700 dark:text-zinc-200">
                   {t.labels.uploadOrTakePhoto}
                 </span>
@@ -1010,6 +1358,7 @@ export default function App() {
                 <input
                   type="file"
                   accept="image/*"
+                  data-testid="single-image-file-input"
                   onChange={handlePhotoUpload}
                   className="hidden"
                 />
@@ -1089,9 +1438,10 @@ export default function App() {
                 <div className="flex items-center gap-2 pt-2">
                   <button
                     type="submit"
-                    className="touch-press flex-1 py-2.5 px-4 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white font-semibold text-xs shadow-xs"
+                    className="touch-press flex-1 py-2.5 px-4 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white font-semibold text-xs shadow-xs flex items-center justify-center gap-1.5"
                   >
-                    {t.actions.save}
+                    <Plus className="w-4 h-4" />
+                    <span>{t.actions.save}</span>
                   </button>
                   <button
                     type="button"
@@ -1112,6 +1462,361 @@ export default function App() {
           </div>
         )}
 
+        {activeTab === 'bulk' && (
+          <div className="space-y-4">
+            {/* A. Multi-File Upload & Batch Progress Header */}
+            <div className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 shadow-2xs space-y-3.5">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold">{t.labels.bulkTitle}</h2>
+                  <p className="text-xs text-slate-500 dark:text-zinc-400 mt-0.5">
+                    {t.labels.bulkSubtitle}
+                  </p>
+                </div>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-xs font-semibold">
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>
+                    {t.labels.pendingVerificationCount.replace(
+                      '{count}',
+                      String(stagingRecords.length)
+                    )}
+                  </span>
+                </span>
+              </div>
+
+              {/* Strict Privacy Banner */}
+              <div className="flex items-center gap-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 px-3 py-2 text-[11px] text-emerald-700 dark:text-emerald-300">
+                <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-500" />
+                <span>{t.labels.privacyBadge}</span>
+              </div>
+
+              {/* Multi-File Dropzone */}
+              <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-200 dark:border-zinc-800 rounded-xl p-5 cursor-pointer hover:border-indigo-500/60 transition-colors bg-slate-50/60 dark:bg-zinc-950/40 text-center">
+                <Upload className="w-6 h-6 text-indigo-500 mb-1.5" />
+                <span className="text-xs font-semibold text-slate-700 dark:text-zinc-200">
+                  {t.actions.selectMultiplePhotos}
+                </span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  data-testid="bulk-file-input"
+                  onChange={handleBulkPhotoUpload}
+                  className="hidden"
+                />
+              </label>
+
+              {/* Sequential Batch Progress Bar */}
+              {isBatchProcessing && (
+                <div
+                  data-testid="batch-progress-banner"
+                  className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3 space-y-2"
+                >
+                  <div className="flex items-center justify-between gap-2 text-xs font-medium text-indigo-700 dark:text-indigo-300">
+                    <span className="truncate">
+                      {t.labels.processingBatchItem
+                        .replace('{current}', String(batchCurrentIndex))
+                        .replace('{total}', String(batchTotalCount))
+                        .replace('{fileName}', batchCurrentFileName)}
+                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="font-mono">{batchFileProgress}%</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          stopBatchRef.current = true;
+                        }}
+                        className="touch-press inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-red-500/15 text-red-700 dark:text-red-300 text-[11px] font-semibold"
+                      >
+                        <Square className="w-3 h-3" />
+                        <span>{t.actions.stopBatch}</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="w-full h-2 rounded-full bg-slate-200 dark:bg-zinc-800 overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-500 transition-all duration-200"
+                      style={{ width: `${batchFileProgress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {sortedStagingRecords.length === 0 ? (
+              <div className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-8 text-center">
+                <Layers className="w-8 h-8 text-slate-400 mx-auto mb-2" />
+                <p className="text-sm font-semibold">{t.labels.noStagingTitle}</p>
+                <p className="text-xs text-slate-500 dark:text-zinc-400 mt-1">
+                  {t.labels.noStagingDesc}
+                </p>
+              </div>
+            ) : (
+              <>
+                {/* B. Mode 1: Step-by-Step "One-by-One" Verification Wizard */}
+                {currentStagingRecord && (
+                  <div
+                    data-testid="one-by-one-wizard"
+                    className="rounded-2xl border border-indigo-500/30 bg-white dark:bg-zinc-900 p-4 shadow-sm space-y-3.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 dark:border-zinc-800 pb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400">
+                          {t.labels.verifyOneByOneTitle
+                            .replace('{current}', String(clampedStagingIndex + 1))
+                            .replace('{total}', String(sortedStagingRecords.length))}
+                        </span>
+                      </div>
+
+                      {/* 1. Prominent Image Filename Banner + Live Accuracy Badge */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          data-testid="wizard-image-name"
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-zinc-800 font-mono text-xs font-bold text-slate-800 dark:text-zinc-100 border border-slate-200 dark:border-zinc-700"
+                        >
+                          <FileImage className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                          <span>{currentStagingRecord.imageName}</span>
+                        </span>
+
+                        <span
+                          data-testid="staging-wizard-accuracy-badge"
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full font-mono text-xs font-semibold ${getAccuracyBadgeClasses(
+                            liveStagingScore
+                          )}`}
+                        >
+                          <span>{t.columns.accuracyScore}:</span>
+                          <span>{liveStagingScore}%</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* 2. Interactive Field Editor with Multi-Candidate Chips */}
+                    {renderRecordFieldsEditor(
+                      stagingEditFields,
+                      handleStagingFieldsChange,
+                      'staging',
+                      'staging',
+                      stagingEditCandidates
+                    )}
+
+                    {/* Collapsible Raw OCR Text Drawer */}
+                    <details className="rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50/60 dark:bg-zinc-950/50 p-2.5">
+                      <summary className="cursor-pointer text-xs font-semibold text-slate-600 dark:text-zinc-400 select-none">
+                        {t.labels.ocrRawText}
+                      </summary>
+                      <div className="mt-2 space-y-1.5">
+                        <textarea
+                          rows={3}
+                          aria-label={t.labels.ocrRawText}
+                          value={stagingEditRawText}
+                          onChange={(e) => handleStagingRawTextChange(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      </div>
+                    </details>
+
+                    {/* 3. One-Tap Verification Controls (Thumb-Friendly) */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-zinc-800">
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={clampedStagingIndex <= 0}
+                          onClick={() =>
+                            setActiveStagingIndex((prev) => Math.max(0, prev - 1))
+                          }
+                          aria-label="Previous staged item"
+                          className="touch-press p-2 rounded-xl border border-slate-200 dark:border-zinc-800 disabled:opacity-40 text-xs font-semibold"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={clampedStagingIndex >= sortedStagingRecords.length - 1}
+                          onClick={() =>
+                            setActiveStagingIndex((prev) =>
+                              Math.min(sortedStagingRecords.length - 1, prev + 1)
+                            )
+                          }
+                          className="touch-press inline-flex items-center gap-1 px-3 py-2 rounded-xl border border-slate-200 dark:border-zinc-800 disabled:opacity-40 text-xs font-semibold"
+                        >
+                          <span>{t.actions.skip}</span>
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-2 flex-1 sm:flex-initial justify-end">
+                        <button
+                          type="button"
+                          onClick={() => handleRejectStagingRow(currentStagingRecord.id)}
+                          className="touch-press inline-flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-red-200 dark:border-red-900/50 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 text-xs font-semibold"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>{t.actions.rejectDelete}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          data-testid="approve-and-next-btn"
+                          onClick={handleApproveCurrentStaging}
+                          className="touch-press inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-xs"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>{t.actions.approveAndNext}</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* C. Mode 2: Staging Table Overview (Laikina patikros lentelė) */}
+                <div className="space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                    <h3 className="text-xs font-semibold text-slate-600 dark:text-zinc-400">
+                      {t.labels.stagingTableTitle} (
+                      {t.labels.pendingVerificationCount.replace(
+                        '{count}',
+                        String(sortedStagingRecords.length)
+                      )}
+                      )
+                    </h3>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStagingSortLowestFirst((prev) => !prev);
+                        setActiveStagingIndex(0);
+                      }}
+                      className="touch-press inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-[11px] font-semibold text-slate-700 dark:text-zinc-300"
+                    >
+                      <ArrowUpDown className="w-3.5 h-3.5 text-indigo-500" />
+                      <span>
+                        {stagingSortLowestFirst
+                          ? t.actions.sortLowestAccuracy
+                          : t.actions.sortInsertionOrder}
+                      </span>
+                    </button>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-2xs overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table
+                        data-testid="staging-queue-table"
+                        className="w-full text-left border-collapse text-xs"
+                      >
+                        <thead>
+                          <tr className="border-b border-slate-200 dark:border-zinc-800 bg-slate-50/80 dark:bg-zinc-950/60 text-[11px] font-semibold text-slate-600 dark:text-zinc-400 whitespace-nowrap">
+                            <th className="py-2.5 px-2.5 w-12 text-center">
+                              {t.columns.rowNumber}
+                            </th>
+                            <th className="py-2.5 px-3">{t.columns.imageName}</th>
+                            <th className="py-2.5 px-3 text-center">
+                              {t.columns.accuracyScore}
+                            </th>
+                            <th className="py-2.5 px-3">{t.columns.fullName}</th>
+                            <th className="py-2.5 px-3">{t.columns.address}</th>
+                            <th className="py-2.5 px-3">{t.columns.phone}</th>
+                            <th className="py-2.5 px-3">{t.columns.licensePlate}</th>
+                            <th className="py-2.5 px-3">{t.columns.carModel}</th>
+                            <th className="py-2.5 px-3">{t.columns.validPeriod}</th>
+                            <th className="py-2.5 px-3">{t.columns.personalCode}</th>
+                            <th className="py-2.5 px-2.5 text-right">{t.columns.actions}</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-zinc-800/70">
+                          {sortedStagingRecords.map((item, idx) => {
+                            const isSelected = currentStagingRecord?.id === item.id;
+                            return (
+                              <tr
+                                key={item.id ?? idx}
+                                className={`transition-colors ${
+                                  isSelected
+                                    ? 'bg-indigo-500/5 dark:bg-indigo-500/10'
+                                    : 'hover:bg-slate-50/80 dark:hover:bg-zinc-800/40'
+                                }`}
+                              >
+                                <td className="py-2.5 px-2.5 text-center font-mono font-semibold text-slate-500 dark:text-zinc-400">
+                                  {idx + 1}
+                                </td>
+                                <td className="py-2.5 px-3 whitespace-nowrap">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-zinc-800 font-mono font-bold text-[11px]">
+                                    <FileImage className="w-3 h-3 text-indigo-500 shrink-0" />
+                                    <span>{item.imageName}</span>
+                                  </span>
+                                </td>
+                                <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                                  <span
+                                    data-testid={`staging-accuracy-badge-${idx + 1}`}
+                                    className={`inline-flex items-center justify-center px-2 py-0.5 rounded-full font-mono text-[11px] font-semibold ${getAccuracyBadgeClasses(
+                                      item.accuracyScore
+                                    )}`}
+                                  >
+                                    {item.accuracyScore}%
+                                  </span>
+                                </td>
+                                <td className="py-2.5 px-3 font-medium whitespace-nowrap">
+                                  {item.fullName || '—'}
+                                </td>
+                                <td
+                                  className="py-2.5 px-3 max-w-[180px] truncate"
+                                  title={item.address}
+                                >
+                                  {item.address || '—'}
+                                </td>
+                                <td className="py-2.5 px-3 font-mono whitespace-nowrap">
+                                  {item.phone || '—'}
+                                </td>
+                                <td className="py-2.5 px-3 font-mono whitespace-nowrap">
+                                  {item.licensePlate || '—'}
+                                </td>
+                                <td className="py-2.5 px-3 whitespace-nowrap">
+                                  {item.carModel || '—'}
+                                </td>
+                                <td className="py-2.5 px-3 font-mono whitespace-nowrap">
+                                  {item.validPeriod || '—'}
+                                </td>
+                                <td className="py-2.5 px-3 font-mono whitespace-nowrap">
+                                  {item.personalCode || '—'}
+                                </td>
+                                <td className="py-2.5 px-2.5 text-right whitespace-nowrap">
+                                  <div className="inline-flex items-center justify-end gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => setActiveStagingIndex(idx)}
+                                      className="touch-press px-2 py-1 rounded-lg border border-slate-200 dark:border-zinc-700 text-[11px] font-semibold hover:bg-slate-100 dark:hover:bg-zinc-800"
+                                    >
+                                      {t.actions.verifyItem}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleApproveStagingRow(item)}
+                                      aria-label={`${t.actions.approve} ${item.imageName}`}
+                                      className="touch-press px-2 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold"
+                                    >
+                                      {t.actions.approve}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRejectStagingRow(item.id)}
+                                      aria-label={`${t.actions.delete} ${item.imageName}`}
+                                      className="touch-press p-1.5 rounded-lg text-slate-500 hover:text-red-600 dark:hover:text-red-400"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {activeTab === 'settings' && (
           <div className="space-y-3.5 max-w-xl mx-auto">
             <div className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4 shadow-2xs">
@@ -1127,7 +1832,7 @@ export default function App() {
                         : 'text-slate-600 dark:text-zinc-400'
                     }`}
                   >
-                    Lietuvių (LT)
+                    Lietuvių
                   </button>
                   <button
                     type="button"
@@ -1138,7 +1843,7 @@ export default function App() {
                         : 'text-slate-600 dark:text-zinc-400'
                     }`}
                   >
-                    English (EN)
+                    English
                   </button>
                 </div>
               </div>
@@ -1278,17 +1983,44 @@ export default function App() {
             <span>{t.navTable}</span>
           </button>
 
+          {/* Instagram / Social Media style Center + Button for Single Image Import */}
           <button
             type="button"
+            data-testid="center-plus-import-btn"
             onClick={() => setActiveTab('import')}
-            className={`touch-press flex flex-col items-center gap-1 text-[11px] font-semibold ${
+            className={`touch-press -mt-3 flex flex-col items-center gap-1 text-[11px] font-semibold ${
               activeTab === 'import'
+                ? 'text-indigo-600 dark:text-indigo-400'
+                : 'text-slate-600 dark:text-zinc-300'
+            }`}
+          >
+            <span
+              className={`w-11 h-11 rounded-2xl flex items-center justify-center text-white shadow-lg transition-transform ${
+                activeTab === 'import'
+                  ? 'bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 ring-4 ring-indigo-500/25 shadow-indigo-500/40 scale-105'
+                  : 'bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 shadow-indigo-500/30 hover:scale-105'
+              }`}
+            >
+              <Plus className="w-6 h-6 stroke-[2.75]" />
+            </span>
+            <span>{t.navImport}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('bulk')}
+            className={`touch-press flex flex-col items-center gap-1 text-[11px] font-semibold ${
+              activeTab === 'bulk'
                 ? 'text-indigo-500'
                 : 'text-slate-500 dark:text-zinc-400'
             }`}
           >
-            <ScanText className="w-5 h-5" />
-            <span>{t.navImport}</span>
+            <Layers className="w-5 h-5" />
+            <span>
+              {stagingRecords.length > 0
+                ? `${t.navBulk} (${stagingRecords.length})`
+                : t.navBulk}
+            </span>
           </button>
 
           <button

@@ -12,6 +12,7 @@ import {
   parseDocumentCandidates,
   parseDocumentText,
 } from '../utils/parser';
+import * as ocrModule from '../utils/ocr';
 import {
   cleanupAllEphemeralResources,
   getActiveEphemeralResourceCount,
@@ -201,7 +202,7 @@ describe('Export Utilities (CSV, XLSX, JSON)', () => {
   });
 });
 
-describe('aiRead CRUD, Accuracy Badges & Multi-Candidate OCR Import App', () => {
+describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Queue', () => {
   it('renders green (>=80%) and red (<50%) accuracy badges in the table and supports CRUD without saving images', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -213,13 +214,26 @@ describe('aiRead CRUD, Accuracy Badges & Multi-Candidate OCR Import App', () => 
     await user.click(screen.getByRole('button', { name: /Naujas įrašas/i }));
     const dialog = screen.getByRole('dialog');
 
+    // Empty columns notice banner and badges are initially visible for all 7 empty fields
+    expect(within(dialog).getByTestId('modal-empty-columns-notice')).toBeInTheDocument();
+    expect(within(dialog).getByTestId('modal-empty-badge-fullName')).toBeInTheDocument();
+
+    // Clicking an empty column chip in the summary banner focuses that input
+    await user.click(within(dialog).getByTestId('modal-jump-empty-fullName'));
+    expect(within(dialog).getByLabelText(/Vardas Pavardė/i)).toHaveFocus();
+
     await user.type(within(dialog).getByLabelText(/Vardas Pavardė/i), 'Petras Petraitis');
+    expect(within(dialog).queryByTestId('modal-empty-badge-fullName')).not.toBeInTheDocument();
+
     await user.type(within(dialog).getByLabelText(/Asmens kodas/i), '38504121234');
     await user.type(within(dialog).getByLabelText(/Telefonas/i), '+370 612 34567');
     await user.type(within(dialog).getByLabelText(/Adresas/i), 'Laisvės al. 10, Kaunas');
     await user.type(within(dialog).getByLabelText(/Valst\. Nr\./i), 'kmn 456');
     await user.type(within(dialog).getByLabelText(/Modelis/i), 'audi a6');
     await user.type(within(dialog).getByLabelText(/Galiojimas/i), '2026.09.04 - 2027.09.04');
+
+    // All 7 columns are now filled -> green completion banner is shown
+    expect(within(dialog).getByTestId('modal-all-columns-filled')).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole('button', { name: /Išsaugoti įrašą/i }));
 
@@ -257,11 +271,17 @@ describe('aiRead CRUD, Accuracy Badges & Multi-Candidate OCR Import App', () => 
     expect(screen.getByText('Accuracy')).toBeInTheDocument();
   });
 
-  it('extracts fields and renders clickable multi-candidate chips below inputs in Import tab', async () => {
+  it('extracts fields and renders clickable multi-candidate chips and center + icon in Import tab', async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole('button', { name: /Importas/i }));
+    // Click the Instagram-style center + button in bottom navigation
+    const centerPlusBtn = screen.getByTestId('center-plus-import-btn');
+    await user.click(centerPlusBtn);
+
+    // Verify single image import dropzone has the prominent center + icon
+    expect(screen.getByTestId('single-image-import-dropzone')).toBeInTheDocument();
+    expect(screen.getByTestId('single-image-plus-icon')).toBeInTheDocument();
 
     const rawTextarea = screen.getByLabelText(/Nuskaitytas tekstas/i);
     await user.type(
@@ -313,6 +333,95 @@ describe('aiRead CRUD, Accuracy Badges & Multi-Candidate OCR Import App', () => 
     expect(await screen.findByText('XYZ 789')).toBeInTheDocument();
     expect(screen.getByText('Kauno g. 15')).toBeInTheDocument();
     expect(screen.getByText('0-612-34567')).toBeInTheDocument();
+  });
+
+  it('processes bulk uploaded images sequentially into db.stagingRecords with imageName and zero photo binary persistence, then verifies and approves one-by-one into db.records', async () => {
+    const extractSpy = vi
+      .spyOn(ocrModule, 'extractTextAndConfidenceFromImageFile')
+      .mockImplementation(async (file: File) => {
+        if (file.name === 'scan_1.jpg') {
+          return {
+            text: [
+              'Klientas: Jonas Jonaitis',
+              'Asmens kodas: 38504121234',
+              'Adresas: Žirgų g. 12',
+              'Kauno g. 15',
+              'Tel.: +370 612 34567',
+              'Valst. nr.: ABC 123',
+              'TOYOTA COROLLA',
+              'Galioja 2026-09-04 - 2027-09-04',
+            ].join('\n'),
+            confidence: 95,
+          };
+        }
+        return {
+          text: ['Klientas: Petras', 'Valst. nr.: KMN 999'].join('\n'),
+          confidence: 40,
+        };
+      });
+
+    try {
+      const user = userEvent.setup();
+      render(<App />);
+
+      // Navigate to Masinis (Bulk) tab
+      await user.click(screen.getByRole('button', { name: /Masinis/i }));
+      expect(screen.getByText('Masinis įkėlimas ir patikra')).toBeInTheDocument();
+
+      const fileInput = screen.getByTestId('bulk-file-input');
+      const file1 = new File(['dummy-1'], 'scan_1.jpg', { type: 'image/jpeg' });
+      const file2 = new File(['dummy-2'], 'scan_2.jpg', { type: 'image/jpeg' });
+
+      await user.upload(fileInput, [file1, file2]);
+
+      // Wait for both items to appear in staging queue
+      expect(await screen.findByTestId('one-by-one-wizard')).toBeInTheDocument();
+      const stagingTable = screen.getByTestId('staging-queue-table');
+      expect(await within(stagingTable).findByText('scan_2.jpg')).toBeInTheDocument();
+      expect(within(stagingTable).getByText('scan_1.jpg')).toBeInTheDocument();
+      expect(screen.getByTestId('wizard-image-name')).toHaveTextContent('scan_1.jpg');
+
+      // 1. Verify db.stagingRecords has both items with imageName, candidates, rawText, accuracyScore, and ZERO image binary/base64 data
+      const stagedInDb = await db.stagingRecords.orderBy('id').toArray();
+      expect(stagedInDb).toHaveLength(2);
+      expect(stagedInDb[0].imageName).toBe('scan_1.jpg');
+      expect(stagedInDb[0].fullName).toBe('Jonas Jonaitis');
+      expect(stagedInDb[0].candidates.address).toEqual(['Žirgų g. 12', 'Kauno g. 15']);
+      expect('imageDataUrl' in stagedInDb[0]).toBe(false);
+      expect('blob' in stagedInDb[0]).toBe(false);
+      expect(stagedInDb[1].imageName).toBe('scan_2.jpg');
+
+      // Main records table must still be empty until approved!
+      expect(await db.records.count()).toBe(0);
+
+      // 3. In the One-by-One Verification Wizard for scan_1.jpg, click candidate chip "Kauno g. 15"
+      const wizard = screen.getByTestId('one-by-one-wizard');
+      const kaunoChip = within(wizard).getByRole('button', { name: 'Kauno g. 15' });
+      await user.click(kaunoChip);
+      expect(within(wizard).getByLabelText(/Adresas/i)).toHaveValue('Kauno g. 15');
+
+      // Click "Patvirtinti ir toliau ->" (Approve & Next)
+      await user.click(screen.getByTestId('approve-and-next-btn'));
+
+      // Verify scan_1.jpg moved to db.records and wizard advanced to scan_2.jpg
+      expect(await screen.findByTestId('wizard-image-name')).toHaveTextContent('scan_2.jpg');
+
+      // scan_2.jpg only has fullName and licensePlate, so empty columns notice banner is shown in staging wizard
+      expect(within(wizard).getByTestId('staging-empty-columns-notice')).toBeInTheDocument();
+      expect(within(wizard).getByTestId('staging-empty-badge-address')).toBeInTheDocument();
+
+      const remainingStaged = await db.stagingRecords.toArray();
+      expect(remainingStaged).toHaveLength(1);
+      expect(remainingStaged[0].imageName).toBe('scan_2.jpg');
+
+      const approvedRecords = await db.records.toArray();
+      expect(approvedRecords).toHaveLength(1);
+      expect(approvedRecords[0].imageName).toBe('scan_1.jpg');
+      expect(approvedRecords[0].fullName).toBe('Jonas Jonaitis');
+      expect(approvedRecords[0].address).toBe('Kauno g. 15');
+    } finally {
+      extractSpy.mockRestore();
+    }
   });
 
   it('toggles between light and dark theme', async () => {

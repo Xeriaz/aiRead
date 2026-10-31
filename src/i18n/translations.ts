@@ -5,9 +5,11 @@ export interface Translations {
   appSubtitle: string;
   navTable: string;
   navImport: string;
+  navBulk: string;
   navSettings: string;
   columns: {
     rowNumber: string;
+    imageName: string;
     fullName: string;
     address: string;
     phone: string;
@@ -32,6 +34,16 @@ export interface Translations {
   actions: {
     addNew: string;
     importPhoto: string;
+    selectMultiplePhotos: string;
+    stopBatch: string;
+    approveAndMove: string;
+    approveAndNext: string;
+    approve: string;
+    skip: string;
+    rejectDelete: string;
+    verifyItem: string;
+    sortLowestAccuracy: string;
+    sortInsertionOrder: string;
     save: string;
     update: string;
     cancel: string;
@@ -56,10 +68,21 @@ export interface Translations {
     editRecordTitle: string;
     importTitle: string;
     importSubtitle: string;
+    bulkTitle: string;
+    bulkSubtitle: string;
     uploadOrTakePhoto: string;
     processingOcr: string;
+    processingBatchItem: string;
+    verifyOneByOneTitle: string;
+    pendingVerificationCount: string;
+    stagingTableTitle: string;
+    noStagingTitle: string;
+    noStagingDesc: string;
     ocrRawText: string;
     verifiedFields: string;
+    emptyFieldBadge: string;
+    emptyFieldsSummary: string;
+    allFieldsFilled: string;
     privacyBadge: string;
     startDate: string;
     endDate: string;
@@ -83,9 +106,11 @@ export const translations: Record<Language, Translations> = {
     appSubtitle: 'Duomenų nuskaitymas ir lentelė',
     navTable: 'Lentelė',
     navImport: 'Importas',
+    navBulk: 'Masinis',
     navSettings: 'Nustatymai',
     columns: {
       rowNumber: 'Eil. Nr.',
+      imageName: 'Nuotrauka / Failas',
       fullName: 'Vardas Pavardė',
       address: 'Adresas',
       phone: 'Telefonas',
@@ -110,6 +135,16 @@ export const translations: Record<Language, Translations> = {
     actions: {
       addNew: 'Naujas įrašas',
       importPhoto: 'Nuskaityti nuotrauką',
+      selectMultiplePhotos: 'Pasirinkti kelias nuotraukas',
+      stopBatch: 'Sustabdyti',
+      approveAndMove: 'Patvirtinti ir perkelti į lentelę',
+      approveAndNext: 'Patvirtinti ir toliau ->',
+      approve: 'Patvirtinti',
+      skip: 'Praleisti',
+      rejectDelete: 'Atmesti / Ištrinti',
+      verifyItem: 'Tikrinti',
+      sortLowestAccuracy: 'Rikiuoti: mažiausias tikslumas viršuje',
+      sortInsertionOrder: 'Rikiuoti: įkėlimo tvarka',
       save: 'Išsaugoti įrašą',
       update: 'Atnaujinti įrašą',
       cancel: 'Atšaukti',
@@ -135,10 +170,22 @@ export const translations: Record<Language, Translations> = {
       importTitle: 'Importas iš nuotraukos',
       importSubtitle:
         'Vietinis optinis teksto atpažinimas (OCR) ir laukų išgavimas be išorinių tarnybų.',
+      bulkTitle: 'Masinis įkėlimas ir patikra',
+      bulkSubtitle:
+        'Įkelkite kelias nuotraukas iš eilės — įrašai patenka į laikiną patikros eilę su failo pavadinimu.',
       uploadOrTakePhoto: 'Pasirinkite arba nufotografuokite dokumentą',
       processingOcr: 'Atpažįstamas tekstas įrenginyje...',
+      processingBatchItem: 'Apdorojama: {current} iš {total} ({fileName})...',
+      verifyOneByOneTitle: 'Tikrinti po vieną ({current} iš {total})',
+      pendingVerificationCount: 'Laukia patvirtinimo ({count})',
+      stagingTableTitle: 'Laikina patikros lentelė',
+      noStagingTitle: 'Patikros eilė tuščia',
+      noStagingDesc: 'Pasirinkite kelias nuotraukas masiniam nuskaitymui ir patikrai.',
       ocrRawText: 'Nuskaitytas tekstas (OCR / įklijuotas)',
       verifiedFields: 'Atpažinti duomenys (patikrinkite prieš išsaugant)',
+      emptyFieldBadge: 'Neužpildyta',
+      emptyFieldsSummary: 'Neužpildyti stulpeliai ({count}):',
+      allFieldsFilled: 'Visi stulpeliai užpildyti (7/7)',
       privacyBadge:
         'Privatumas: nuotraukos apdorojamos tik laikinoje atmintyje ir niekur nesaugomos.',
       startDate: 'Pradžia',
@@ -161,9 +208,11 @@ export const translations: Record<Language, Translations> = {
     appSubtitle: 'Document Reader & CRUD Table',
     navTable: 'Table',
     navImport: 'Import',
+    navBulk: 'Bulk',
     navSettings: 'Settings',
     columns: {
       rowNumber: 'No.',
+      imageName: 'Image Name',
       fullName: 'Full Name',
       address: 'Address',
       phone: 'Phone',
@@ -188,6 +237,16 @@ export const translations: Record<Language, Translations> = {
     actions: {
       addNew: 'Add Record',
       importPhoto: 'Scan Photo',
+      selectMultiplePhotos: 'Select Multiple Photos',
+      stopBatch: 'Stop Batch',
+      approveAndMove: 'Approve & Move to Main Table',
+      approveAndNext: 'Approve & Next ->',
+      approve: 'Approve',
+      skip: 'Skip',
+      rejectDelete: 'Reject / Delete',
+      verifyItem: 'Verify',
+      sortLowestAccuracy: 'Sort: Lowest Accuracy First',
+      sortInsertionOrder: 'Sort: Upload Order',
       save: 'Save Record',
       update: 'Update Record',
       cancel: 'Cancel',
@@ -212,10 +271,22 @@ export const translations: Record<Language, Translations> = {
       editRecordTitle: 'Edit Record',
       importTitle: 'Import via Photo',
       importSubtitle: '100% local on-device OCR & RegExp extraction without external AI services.',
+      bulkTitle: 'Bulk Import & Verification',
+      bulkSubtitle:
+        'Upload multiple photos sequentially — items enter a staging queue with their image filename for verification.',
       uploadOrTakePhoto: 'Choose or take a photo of a document',
       processingOcr: 'Extracting text locally on device...',
+      processingBatchItem: 'Processing {current} of {total} ({fileName})...',
+      verifyOneByOneTitle: 'Verify One-by-One ({current} of {total})',
+      pendingVerificationCount: 'Pending Verification ({count})',
+      stagingTableTitle: 'Staging Queue Table',
+      noStagingTitle: 'Staging queue is empty',
+      noStagingDesc: 'Select multiple photos for sequential OCR and manual verification.',
       ocrRawText: 'Extracted Text (OCR / Paste)',
       verifiedFields: 'Extracted Fields (verify before saving)',
+      emptyFieldBadge: 'Empty',
+      emptyFieldsSummary: 'Empty columns ({count}):',
+      allFieldsFilled: 'All columns filled (7/7)',
       privacyBadge: 'Privacy: photos are processed in RAM only and never saved to database.',
       startDate: 'Start',
       endDate: 'End',
