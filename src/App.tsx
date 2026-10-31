@@ -88,10 +88,6 @@ export default function App() {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
   };
 
-  const toggleLanguage = () => {
-    setLang((prev) => (prev === 'lt' ? 'en' : 'lt'));
-  };
-
   const openNewRecordModal = () => {
     setEditingId(null);
     setFormFields(EMPTY_FORM);
@@ -282,20 +278,16 @@ export default function App() {
           <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
-              onClick={toggleLanguage}
-              aria-label="Toggle language"
-              className="touch-press px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs font-semibold text-slate-700 dark:text-zinc-200 hover:bg-slate-100 dark:hover:bg-zinc-800"
+              onClick={() => setActiveTab((prev) => (prev === 'settings' ? 'table' : 'settings'))}
+              aria-label={t.navSettings}
+              title={t.navSettings}
+              className={`touch-press p-2 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                activeTab === 'settings'
+                  ? 'bg-indigo-50 border-indigo-200 text-indigo-600 dark:bg-indigo-950/40 dark:border-indigo-800 dark:text-indigo-400'
+                  : 'bg-white dark:bg-zinc-900 border-slate-200 dark:border-zinc-800 text-slate-600 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800'
+              }`}
             >
-              {lang.toUpperCase()}
-            </button>
-
-            <button
-              type="button"
-              onClick={toggleTheme}
-              aria-label="Toggle theme"
-              className="touch-press p-2 rounded-lg border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-slate-600 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800"
-            >
-              {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+              <Settings className="w-4 h-4" />
             </button>
           </div>
         </div>
@@ -343,6 +335,20 @@ export default function App() {
         {activeTab === 'settings' && (
           <div className="space-y-3.5 max-w-xl mx-auto">
             <div className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4 shadow-2xs">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-zinc-800">
+                <div className="flex items-center gap-2">
+                  <Settings className="w-4 h-4 text-indigo-500" />
+                  <h2 className="text-sm font-bold">{t.navSettings}</h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('table')}
+                  className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+                >
+                  {t.navTable}
+                </button>
+              </div>
+
               <div className="flex items-center justify-between">
                 <span className="text-xs font-medium">{t.labels.language}</span>
                 <div className="inline-flex rounded-xl border border-slate-200 dark:border-zinc-800 p-0.5 bg-slate-50 dark:bg-zinc-950">
@@ -376,9 +382,20 @@ export default function App() {
                 <button
                   type="button"
                   onClick={toggleTheme}
-                  className="touch-press px-3 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 text-xs font-medium"
+                  aria-label="Toggle theme"
+                  className="touch-press px-3 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 text-xs font-medium flex items-center gap-1.5 hover:bg-slate-50 dark:hover:bg-zinc-800"
                 >
-                  {theme === 'light' ? t.labels.lightMode : t.labels.darkMode}
+                  {theme === 'light' ? (
+                    <>
+                      <Moon className="w-3.5 h-3.5" />
+                      <span>{t.labels.lightMode}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sun className="w-3.5 h-3.5 text-amber-400" />
+                      <span>{t.labels.darkMode}</span>
+                    </>
+                  )}
                 </button>
               </div>
 
@@ -447,7 +464,7 @@ export default function App() {
         aria-label="Bottom Navigation"
         className="fixed bottom-0 inset-x-0 z-30 glass-panel border-t border-slate-200 dark:border-zinc-800 pb-safe pl-safe pr-safe"
       >
-        <div className="max-w-xl mx-auto px-4 h-15 flex items-center justify-around">
+        <div className="max-w-md mx-auto px-6 h-15 flex items-center justify-around">
           <button
             type="button"
             onClick={() => setActiveTab('table')}
@@ -499,19 +516,6 @@ export default function App() {
                 ? `${t.navBulk} (${stagingRecords.length})`
                 : t.navBulk}
             </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('settings')}
-            className={`touch-press flex flex-col items-center gap-1 text-[11px] font-semibold ${
-              activeTab === 'settings'
-                ? 'text-indigo-500'
-                : 'text-slate-500 dark:text-zinc-400'
-            }`}
-          >
-            <Settings className="w-5 h-5" />
-            <span>{t.navSettings}</span>
           </button>
         </div>
       </nav>

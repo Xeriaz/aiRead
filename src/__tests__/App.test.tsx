@@ -306,8 +306,10 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
     expect(stored).toHaveLength(2);
     expect('imageDataUrl' in stored[0]).toBe(false);
 
-    // Switch language to English
-    await user.click(screen.getByRole('button', { name: /Toggle language/i }));
+    // Switch language to English in Settings via header Settings button
+    await user.click(screen.getByRole('button', { name: /Nustatymai|Settings/i }));
+    await user.click(screen.getByRole('button', { name: 'English' }));
+    await user.click(within(screen.getByRole('navigation')).getByRole('button', { name: /Table/i }));
     expect(screen.getByText('Add Record')).toBeInTheDocument();
     expect(screen.getByText('Validity Period')).toBeInTheDocument();
     expect(screen.getByText('Accuracy')).toBeInTheDocument();
@@ -565,6 +567,8 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
     const user = userEvent.setup();
     render(<App />);
 
+    // Open Settings from header
+    await user.click(screen.getByRole('button', { name: /Nustatymai|Settings/i }));
     const toggleButton = screen.getByRole('button', { name: /Toggle theme/i });
     expect(document.documentElement.classList.contains('light')).toBe(true);
 
