@@ -1,20 +1,30 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as XLSX from 'xlsx';
 import App from '../App';
 import { db } from '../db/db';
 import {
+  calculateAccuracyScore,
   formatPhoneNumber,
   formatValidPeriod,
+  isValidLithuanianPersonalCode,
+  parseDocumentCandidates,
   parseDocumentText,
 } from '../utils/parser';
+import {
+  cleanupAllEphemeralResources,
+  getActiveEphemeralResourceCount,
+  IMAGE_MEMORY_TTL_MS,
+  registerEphemeralResource,
+} from '../utils/ocr';
 import {
   generateCsvContent,
   generateJsonContent,
   generateXlsxBuffer,
 } from '../utils/export';
 
-describe('Parser & Normalization Utilities', () => {
+describe('Parser, Accuracy Scoring & Multi-Candidate Utilities', () => {
   it('normalizes Lithuanian phone numbers into 0-6XX-XXXXX format', () => {
     expect(formatPhoneNumber('+370 612 34567')).toBe('0-612-34567');
     expect(formatPhoneNumber('8 612 34567')).toBe('0-612-34567');
@@ -31,12 +41,48 @@ describe('Parser & Normalization Utilities', () => {
     expect(formatValidPeriod('2026-09-04', true)).toBe('2026-09-04 2027-09-04');
   });
 
-  it('extracts all 7 fields from Lithuanian document OCR text', () => {
+  it('validates Lithuanian 11-digit personal code modulo-11 checksum and calculates accuracy score', () => {
+    // 38504121234 has a valid modulo-11 checksum (4)
+    expect(isValidLithuanianPersonalCode('38504121234')).toBe(true);
+    // 38504121230 has valid date pattern but invalid checksum
+    expect(isValidLithuanianPersonalCode('38504121230')).toBe(false);
+    expect(isValidLithuanianPersonalCode('12345')).toBe(false);
+
+    const perfectFields = {
+      fullName: 'Jonas Jonaitis',
+      address: 'Gedimino pr. 15-4, LT-01103 Vilnius',
+      phone: '0-612-34567',
+      licensePlate: 'ABC 123',
+      carModel: 'TOYOTA COROLLA',
+      validPeriod: '2026-09-04 2027-09-04',
+      personalCode: '38504121234',
+    };
+    expect(calculateAccuracyScore(perfectFields)).toBe(100);
+    // Blended with 80% fieldScore (100) + 20% ocrConfidence (50) => 90
+    expect(calculateAccuracyScore(perfectFields, 50)).toBe(90);
+
+    const lowFields = {
+      fullName: 'Jonas',
+      address: '',
+      phone: '',
+      licensePlate: '',
+      carModel: '',
+      validPeriod: '',
+      personalCode: '',
+    };
+    expect(calculateAccuracyScore(lowFields)).toBe(5);
+  });
+
+  it('extracts all 7 fields and multi-candidate suggestions from Lithuanian document OCR text', () => {
     const sampleOcr = `
       Vardas, pavardė: Jonas Jonaitis
+      Valdytojas: Petras Petraitis
       Asmens kodas: 38504121234
-      Adresas: Gedimino pr. 15-4, LT-01103 Vilnius
+      Adresas: Žirgų g. 12
+      Deklaruota gyv. vieta: Kauno g. 15
+      Ryto g. 13
       Tel.: +370 612 34567
+      Mob.: +370 699 11223
       Valst. nr.: ABC 123
       Markė, modelis: TOYOTA COROLLA
       Galioja nuo 2026-09-04 iki 2027-09-04
@@ -45,11 +91,68 @@ describe('Parser & Normalization Utilities', () => {
     const parsed = parseDocumentText(sampleOcr);
     expect(parsed.fullName).toBe('Jonas Jonaitis');
     expect(parsed.personalCode).toBe('38504121234');
-    expect(parsed.address).toBe('Gedimino pr. 15-4, LT-01103 Vilnius');
+    expect(parsed.address).toBe('Žirgų g. 12');
     expect(parsed.phone).toBe('0-612-34567');
     expect(parsed.licensePlate).toBe('ABC 123');
     expect(parsed.carModel).toBe('TOYOTA COROLLA');
     expect(parsed.validPeriod).toBe('2026-09-04 2027-09-04');
+
+    const candidates = parseDocumentCandidates(sampleOcr);
+    expect(candidates.address).toEqual(['Žirgų g. 12', 'Kauno g. 15', 'Ryto g. 13']);
+    expect(candidates.fullName).toEqual(['Jonas Jonaitis', 'Petras Petraitis']);
+    expect(candidates.phone).toEqual(['0-612-34567', '0-699-11223']);
+  });
+});
+
+describe('Ephemeral Image Memory Hard TTL Watchdog', () => {
+  it('automatically revokes blob URLs, zeroes canvases, and terminates workers after 30s TTL or manual cleanup', async () => {
+    vi.useFakeTimers();
+    try {
+      expect(IMAGE_MEMORY_TTL_MS).toBe(30_000);
+      const revokeSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+      const canvas = document.createElement('canvas');
+      canvas.width = 1200;
+      canvas.height = 800;
+      const terminateMock = vi.fn().mockResolvedValue(undefined);
+
+      registerEphemeralResource({
+        objectUrl: 'blob:test-ephemeral-1',
+        canvas,
+        worker: { terminate: terminateMock },
+      });
+
+      expect(getActiveEphemeralResourceCount()).toBe(1);
+
+      // Advance past 30-second TTL watchdog
+      vi.advanceTimersByTime(IMAGE_MEMORY_TTL_MS + 10);
+      await Promise.resolve();
+
+      expect(getActiveEphemeralResourceCount()).toBe(0);
+      expect(revokeSpy).toHaveBeenCalledWith('blob:test-ephemeral-1');
+      expect(canvas.width).toBe(0);
+      expect(canvas.height).toBe(0);
+      expect(terminateMock).toHaveBeenCalledTimes(1);
+
+      // Also verify immediate cleanupAllEphemeralResources()
+      const canvas2 = document.createElement('canvas');
+      canvas2.width = 500;
+      canvas2.height = 500;
+      registerEphemeralResource({
+        objectUrl: 'blob:test-ephemeral-2',
+        canvas: canvas2,
+      });
+      expect(getActiveEphemeralResourceCount()).toBe(1);
+
+      cleanupAllEphemeralResources();
+      expect(getActiveEphemeralResourceCount()).toBe(0);
+      expect(revokeSpy).toHaveBeenCalledWith('blob:test-ephemeral-2');
+      expect(canvas2.width).toBe(0);
+      expect(canvas2.height).toBe(0);
+
+      revokeSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -64,48 +167,54 @@ describe('Export Utilities (CSV, XLSX, JSON)', () => {
       carModel: 'VOLKSWAGEN PASSAT',
       validPeriod: '2026-09-04 2027-09-04',
       personalCode: '38504121234',
+      accuracyScore: 100,
       createdAt: '2026-09-04T10:00:00.000Z',
       updatedAt: '2026-09-04T10:00:00.000Z',
     },
   ];
 
-  it('generates UTF-8 BOM CSV with Lithuanian headers and Eil. Nr.', () => {
+  it('generates UTF-8 BOM CSV with Lithuanian headers, Eil. Nr., and Tikslumas', () => {
     const csv = generateCsvContent(sampleRecords, 'lt');
     expect(csv.startsWith('\uFEFF')).toBe(true);
     expect(csv).toContain(
-      'Eil. Nr.,Vardas Pavardė,Adresas,Telefonas,Valst. Nr.,Modelis,Galiojimas,Asmens kodas'
+      'Eil. Nr.,Vardas Pavardė,Adresas,Telefonas,Valst. Nr.,Modelis,Galiojimas,Asmens kodas,Tikslumas'
     );
     expect(csv).toContain(
-      '1,Jonas Jonaitis,"Gedimino pr. 15-4, Vilnius",0-612-34567,ABC 123,VOLKSWAGEN PASSAT,2026-09-04 2027-09-04,38504121234'
+      '1,Jonas Jonaitis,"Gedimino pr. 15-4, Vilnius",0-612-34567,ABC 123,VOLKSWAGEN PASSAT,2026-09-04 2027-09-04,38504121234,100%'
     );
   });
 
-  it('generates JSON and XLSX buffer with localized columns', () => {
+  it('generates JSON and XLSX buffer with localized columns including Tikslumas / Accuracy', () => {
     const json = generateJsonContent(sampleRecords, 'lt');
     const parsed = JSON.parse(json);
     expect(parsed[0]['Eil. Nr.']).toBe(1);
     expect(parsed[0]['Vardas Pavardė']).toBe('Jonas Jonaitis');
     expect(parsed[0]['Modelis']).toBe('VOLKSWAGEN PASSAT');
+    expect(parsed[0]['Tikslumas']).toBe('100%');
 
     const xlsxBuf = generateXlsxBuffer(sampleRecords, 'lt');
     expect(xlsxBuf.byteLength).toBeGreaterThan(100);
+    const workbook = XLSX.read(xlsxBuf, { type: 'array' });
+    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json<Record<string, string | number>>(firstSheet);
+    expect(rows[0]['Tikslumas']).toBe('100%');
   });
 });
 
-describe('aiRead CRUD & OCR Import App', () => {
-  it('renders in Lithuanian by default, switches to English, and supports CRUD operations without saving images', async () => {
+describe('aiRead CRUD, Accuracy Badges & Multi-Candidate OCR Import App', () => {
+  it('renders green (>=80%) and red (<50%) accuracy badges in the table and supports CRUD without saving images', async () => {
     const user = userEvent.setup();
     render(<App />);
 
     expect(screen.getByText('aiRead')).toBeInTheDocument();
     expect(screen.getByText('Naujas įrašas')).toBeInTheDocument();
 
-    // Create a new record via modal
+    // 1. Create a high-accuracy record (>= 80% -> green badge)
     await user.click(screen.getByRole('button', { name: /Naujas įrašas/i }));
     const dialog = screen.getByRole('dialog');
 
     await user.type(within(dialog).getByLabelText(/Vardas Pavardė/i), 'Petras Petraitis');
-    await user.type(within(dialog).getByLabelText(/Asmens kodas/i), '39005151234');
+    await user.type(within(dialog).getByLabelText(/Asmens kodas/i), '38504121234');
     await user.type(within(dialog).getByLabelText(/Telefonas/i), '+370 612 34567');
     await user.type(within(dialog).getByLabelText(/Adresas/i), 'Laisvės al. 10, Kaunas');
     await user.type(within(dialog).getByLabelText(/Valst\. Nr\./i), 'kmn 456');
@@ -114,26 +223,41 @@ describe('aiRead CRUD & OCR Import App', () => {
 
     await user.click(within(dialog).getByRole('button', { name: /Išsaugoti įrašą/i }));
 
-    // Verify table row renders formatted values
+    // Verify table row renders formatted values and green accuracy badge
     expect(await screen.findByText('Petras Petraitis')).toBeInTheDocument();
     expect(screen.getByText('0-612-34567')).toBeInTheDocument();
     expect(screen.getByText('KMN 456')).toBeInTheDocument();
     expect(screen.getByText('AUDI A6')).toBeInTheDocument();
     expect(screen.getByText('2026-09-04 2027-09-04')).toBeInTheDocument();
-    expect(screen.getByText('39005151234')).toBeInTheDocument();
+    expect(screen.getByText('38504121234')).toBeInTheDocument();
+
+    const greenBadge = screen.getByTestId('accuracy-badge-1');
+    expect(greenBadge).toHaveTextContent('100%');
+    expect(greenBadge.className).toContain('bg-emerald-500/15');
+
+    // 2. Create a low-accuracy record (< 50% -> red badge)
+    await user.click(screen.getByRole('button', { name: /Naujas įrašas/i }));
+    const dialog2 = screen.getByRole('dialog');
+    await user.type(within(dialog2).getByLabelText(/Vardas Pavardė/i), 'Jonas');
+    await user.click(within(dialog2).getByRole('button', { name: /Išsaugoti įrašą/i }));
+
+    const redBadge = await screen.findByTestId('accuracy-badge-2');
+    expect(redBadge).toHaveTextContent('5%');
+    expect(redBadge.className).toContain('bg-red-500/15');
 
     // Verify database record has zero image fields
     const stored = await db.records.toArray();
-    expect(stored).toHaveLength(1);
+    expect(stored).toHaveLength(2);
     expect('imageDataUrl' in stored[0]).toBe(false);
 
     // Switch language to English
     await user.click(screen.getByRole('button', { name: /Toggle language/i }));
     expect(screen.getByText('Add Record')).toBeInTheDocument();
     expect(screen.getByText('Validity Period')).toBeInTheDocument();
+    expect(screen.getByText('Accuracy')).toBeInTheDocument();
   });
 
-  it('extracts fields in Import tab from pasted OCR text and saves record', async () => {
+  it('extracts fields and renders clickable multi-candidate chips below inputs in Import tab', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -142,19 +266,53 @@ describe('aiRead CRUD & OCR Import App', () => {
     const rawTextarea = screen.getByLabelText(/Nuskaitytas tekstas/i);
     await user.type(
       rawTextarea,
-      'Klientas: Onaitytė Rasa\nA.k. 49208081122\nTel. 8 655 44332\nAdresas: Taikos pr. 22-8, Klaipėda\nValst. nr. XYZ 789\nVOLVO XC60\nGalioja 2026-09-04 - 2027-09-04'
+      [
+        'Klientas: Onaitytė Rasa',
+        'Valdytojas: Jonas Jonaitis',
+        'A.k. 38504121234',
+        'Tel. 8 655 44332',
+        'Mob. +370 612 34567',
+        'Adresas: Žirgų g. 12',
+        'Kauno g. 15',
+        'Ryto g. 13',
+        'Valst. nr. XYZ 789',
+        'VOLVO XC60',
+        'Galioja 2026-09-04 - 2027-09-04',
+      ].join('\n')
     );
 
-    expect(screen.getByLabelText(/Telefonas/i)).toHaveValue('0-655-44332');
-    expect(screen.getByLabelText(/Valst\. Nr\./i)).toHaveValue('XYZ 789');
-    expect(screen.getByLabelText(/Modelis/i)).toHaveValue('VOLVO XC60');
-    expect(screen.getByLabelText(/Galiojimas/i)).toHaveValue('2026-09-04 2027-09-04');
-    expect(screen.getByLabelText(/Asmens kodas/i)).toHaveValue('49208081122');
+    const addressInput = screen.getByLabelText(/Adresas/i);
+    expect(addressInput).toHaveValue('Žirgų g. 12');
+
+    // Alternative addresses appear as clickable chips below the Adresas input
+    const addressChipsContainer = screen.getByTestId('candidates-address');
+    const kaunoChip = within(addressChipsContainer).getByRole('button', { name: 'Kauno g. 15' });
+    const rytoChip = within(addressChipsContainer).getByRole('button', { name: 'Ryto g. 13' });
+    expect(kaunoChip).toBeInTheDocument();
+    expect(rytoChip).toBeInTheDocument();
+
+    // Clicking "Kauno g. 15" chip fills the Adresas input with "Kauno g. 15"
+    await user.click(kaunoChip);
+    expect(addressInput).toHaveValue('Kauno g. 15');
+    // And "Žirgų g. 12" is now offered as an alternative chip
+    expect(
+      within(screen.getByTestId('candidates-address')).getByRole('button', { name: 'Žirgų g. 12' })
+    ).toBeInTheDocument();
+
+    // Alternative phone chip works too
+    const phoneInput = screen.getByLabelText(/Telefonas/i);
+    expect(phoneInput).toHaveValue('0-655-44332');
+    const altPhoneChip = within(screen.getByTestId('candidates-phone')).getByRole('button', {
+      name: '0-612-34567',
+    });
+    await user.click(altPhoneChip);
+    expect(phoneInput).toHaveValue('0-612-34567');
 
     await user.click(screen.getByRole('button', { name: /Išsaugoti įrašą/i }));
 
     expect(await screen.findByText('XYZ 789')).toBeInTheDocument();
-    expect(screen.getByText('VOLVO XC60')).toBeInTheDocument();
+    expect(screen.getByText('Kauno g. 15')).toBeInTheDocument();
+    expect(screen.getByText('0-612-34567')).toBeInTheDocument();
   });
 
   it('toggles between light and dark theme', async () => {

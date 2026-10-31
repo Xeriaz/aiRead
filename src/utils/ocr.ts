@@ -4,23 +4,133 @@ export interface OcrProgressCallback {
   (progressPercent: number): void;
 }
 
+export interface OcrExtractionResult {
+  text: string;
+  confidence?: number;
+}
+
+export interface EphemeralResourceHandle {
+  objectUrl?: string;
+  canvas?: HTMLCanvasElement | null;
+  worker?: { terminate: () => Promise<unknown> | unknown } | null;
+}
+
+interface ActiveEphemeralEntry {
+  handle: EphemeralResourceHandle;
+  timerId: ReturnType<typeof setTimeout>;
+  disposed: boolean;
+}
+
 /**
- * Pre-processes an image File in transient memory on an offscreen canvas
- * (downscales to max 2000px and increases grayscale contrast for cleaner OCR),
- * runs local Tesseract.js OCR (Lithuanian + English), and immediately destroys
- * all temporary image buffers and object URLs.
+ * Hard 30-second TTL watchdog limit for any ephemeral image in RAM.
+ * Images NEVER touch localStorage, sessionStorage, IndexedDB, or disk cache.
  */
-export async function extractTextFromImageFile(
+export const IMAGE_MEMORY_TTL_MS = 30_000;
+
+const activeEphemeralRegistry = new Set<ActiveEphemeralEntry>();
+
+async function disposeEphemeralEntry(entry: ActiveEphemeralEntry): Promise<void> {
+  if (entry.disposed) return;
+  entry.disposed = true;
+  activeEphemeralRegistry.delete(entry);
+  clearTimeout(entry.timerId);
+
+  const { handle } = entry;
+
+  if (handle.objectUrl) {
+    try {
+      URL.revokeObjectURL(handle.objectUrl);
+    } catch {
+      // Ignore errors in non-browser test environments
+    }
+    handle.objectUrl = undefined;
+  }
+
+  if (handle.canvas) {
+    try {
+      handle.canvas.width = 0;
+      handle.canvas.height = 0;
+    } catch {
+      // Ignore errors if canvas was already detached
+    }
+    handle.canvas = null;
+  }
+
+  if (handle.worker) {
+    const workerToTerminate = handle.worker;
+    handle.worker = null;
+    try {
+      await workerToTerminate.terminate();
+    } catch {
+      // Ignore worker termination errors
+    }
+  }
+}
+
+/**
+ * Registers an ephemeral image resource (blob URL, offscreen canvas, and/or Tesseract worker)
+ * with a hard 30-second TTL watchdog timer. If OCR hangs or is interrupted, the watchdog
+ * automatically revokes the blob URL, zeroes the canvas dimensions, and terminates the worker.
+ */
+export function registerEphemeralResource(
+  handle: EphemeralResourceHandle,
+  ttlMs: number = IMAGE_MEMORY_TTL_MS
+): () => Promise<void> {
+  const entry: ActiveEphemeralEntry = {
+    handle,
+    disposed: false,
+    timerId: setTimeout(() => {
+      void disposeEphemeralEntry(entry);
+    }, ttlMs),
+  };
+
+  activeEphemeralRegistry.add(entry);
+
+  return () => disposeEphemeralEntry(entry);
+}
+
+/**
+ * Immediately purges all active ephemeral image buffers, blob URLs, offscreen canvases,
+ * and OCR workers currently registered in RAM.
+ */
+export function cleanupAllEphemeralResources(): void {
+  for (const entry of Array.from(activeEphemeralRegistry)) {
+    void disposeEphemeralEntry(entry);
+  }
+}
+
+export const cleanupAllEphemeralImages = cleanupAllEphemeralResources;
+
+export function getActiveEphemeralResourceCount(): number {
+  return activeEphemeralRegistry.size;
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', cleanupAllEphemeralImages);
+}
+
+/**
+ * Pre-processes an image File in transient memory on an offscreen canvas,
+ * runs local Tesseract.js OCR (Lithuanian + English), returns extracted text and
+ * OCR confidence (0-100), and strictly destroys all temporary image buffers via
+ * both `finally` cleanup and the 30-second hard TTL watchdog.
+ */
+export async function extractTextAndConfidenceFromImageFile(
   file: File,
   onProgress?: OcrProgressCallback
-): Promise<string> {
+): Promise<OcrExtractionResult> {
   const objectUrl = URL.createObjectURL(file);
-  let canvas: HTMLCanvasElement | null = null;
+  const resourceHandle: EphemeralResourceHandle = {
+    objectUrl,
+    canvas: null,
+    worker: null,
+  };
+  const releaseResources = registerEphemeralResource(resourceHandle, IMAGE_MEMORY_TTL_MS);
 
   try {
     onProgress?.(5);
     const processedSource = await preprocessImageInMemory(objectUrl, (c) => {
-      canvas = c;
+      resourceHandle.canvas = c;
     });
 
     onProgress?.(15);
@@ -31,25 +141,33 @@ export async function extractTextFromImageFile(
         }
       },
     });
+    resourceHandle.worker = worker;
 
-    try {
-      const {
-        data: { text },
-      } = await worker.recognize(processedSource);
-      onProgress?.(100);
-      return text || '';
-    } finally {
-      await worker.terminate();
-    }
+    const {
+      data: { text, confidence },
+    } = await worker.recognize(processedSource);
+    onProgress?.(100);
+    return {
+      text: text || '',
+      confidence: typeof confidence === 'number' ? confidence : undefined,
+    };
   } finally {
-    // Strictly purge transient image from memory
-    URL.revokeObjectURL(objectUrl);
-    if (canvas) {
-      const c = canvas as HTMLCanvasElement;
-      c.width = 0;
-      c.height = 0;
-    }
+    await releaseResources();
   }
+}
+
+/**
+ * Pre-processes an image File in transient memory on an offscreen canvas
+ * (downscales to max 2000px and increases grayscale contrast for cleaner OCR),
+ * runs local Tesseract.js OCR (Lithuanian + English), and immediately destroys
+ * all temporary image buffers and object URLs.
+ */
+export async function extractTextFromImageFile(
+  file: File,
+  onProgress?: OcrProgressCallback
+): Promise<string> {
+  const result = await extractTextAndConfidenceFromImageFile(file, onProgress);
+  return result.text;
 }
 
 async function preprocessImageInMemory(

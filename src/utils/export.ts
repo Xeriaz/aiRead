@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import type { TableRecord } from '../db/db';
 import { translations, type Language } from '../i18n/translations';
+import { calculateAccuracyScore } from './parser';
 
 export interface ExportRow {
   rowNumber: number;
@@ -11,6 +12,7 @@ export interface ExportRow {
   carModel: string;
   validPeriod: string;
   personalCode: string;
+  accuracyScore: string;
 }
 
 export function buildExportRows(records: TableRecord[]): ExportRow[] {
@@ -23,6 +25,7 @@ export function buildExportRows(records: TableRecord[]): ExportRow[] {
     carModel: rec.carModel,
     validPeriod: rec.validPeriod,
     personalCode: rec.personalCode,
+    accuracyScore: `${rec.accuracyScore ?? calculateAccuracyScore(rec)}%`,
   }));
 }
 
@@ -40,6 +43,7 @@ export function buildLocalizedObjects(
     [cols.carModel]: rec.carModel,
     [cols.validPeriod]: rec.validPeriod,
     [cols.personalCode]: rec.personalCode,
+    [cols.accuracyScore]: `${rec.accuracyScore ?? calculateAccuracyScore(rec)}%`,
   }));
 }
 
@@ -62,6 +66,7 @@ export function generateCsvContent(records: TableRecord[], lang: Language): stri
     cols.carModel,
     cols.validPeriod,
     cols.personalCode,
+    cols.accuracyScore,
   ];
 
   const rows = buildExportRows(records).map((r) => [
@@ -73,6 +78,7 @@ export function generateCsvContent(records: TableRecord[], lang: Language): stri
     r.carModel,
     r.validPeriod,
     r.personalCode,
+    r.accuracyScore,
   ]);
 
   const lines = [
@@ -101,6 +107,7 @@ export function generateXlsxBuffer(records: TableRecord[], lang: Language): Uint
     cols.carModel,
     cols.validPeriod,
     cols.personalCode,
+    cols.accuracyScore,
   ];
 
   const worksheet =
@@ -117,6 +124,7 @@ export function generateXlsxBuffer(records: TableRecord[], lang: Language): Uint
     { wch: 22 },
     { wch: 23 },
     { wch: 15 },
+    { wch: 12 },
   ];
 
   const workbook = XLSX.utils.book_new();

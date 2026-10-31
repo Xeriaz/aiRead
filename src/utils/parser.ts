@@ -8,6 +8,8 @@ export interface ParsedDocumentFields {
   personalCode: string;
 }
 
+export type ParsedDocumentCandidates = Record<keyof ParsedDocumentFields, string[]>;
+
 const CAR_MAKES = [
   'MERCEDES-BENZ',
   'MERCEDES BENZ',
@@ -72,6 +74,157 @@ const FALSE_POSITIVE_PLATES = new Set([
   'MET',
   'SER',
 ]);
+
+const LITHUANIAN_PERSONAL_CODE_DATE_REGEX =
+  /^[1-6]\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{4}$/;
+
+function addUniqueCandidate(list: string[], value: string): void {
+  const cleaned = value.trim();
+  if (!cleaned) return;
+  if (!list.some((item) => item.toLowerCase() === cleaned.toLowerCase())) {
+    list.push(cleaned);
+  }
+}
+
+/**
+ * Validates an 11-digit Lithuanian personal code (Asmens kodas),
+ * including the official modulo-11 checksum algorithm.
+ */
+export function isValidLithuanianPersonalCode(code: string): boolean {
+  if (!code) return false;
+  const trimmed = code.trim();
+  if (!LITHUANIAN_PERSONAL_CODE_DATE_REGEX.test(trimmed)) {
+    return false;
+  }
+
+  const digits = trimmed.split('').map(Number);
+  const weights1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 1];
+  const weights2 = [3, 4, 5, 6, 7, 8, 9, 1, 2, 3];
+
+  let sum1 = 0;
+  for (let i = 0; i < 10; i++) {
+    sum1 += digits[i] * weights1[i];
+  }
+  let remainder = sum1 % 11;
+
+  if (remainder === 10) {
+    let sum2 = 0;
+    for (let i = 0; i < 10; i++) {
+      sum2 += digits[i] * weights2[i];
+    }
+    remainder = sum2 % 11;
+    if (remainder === 10) {
+      remainder = 0;
+    }
+  }
+
+  return digits[10] === remainder;
+}
+
+/**
+ * Calculates a 0-100 data read accuracy score across all 7 extracted/verified fields,
+ * optionally blended with Tesseract OCR confidence (80% field validation + 20% OCR confidence).
+ */
+export function calculateAccuracyScore(
+  fields: ParsedDocumentFields,
+  ocrConfidence?: number
+): number {
+  let fieldScore = 0;
+
+  // 1. personalCode (20 pts): 20 pts if 11-digit valid date + valid checksum; 14 pts if 11-digit valid date pattern; 0 pts otherwise.
+  const pc = (fields.personalCode || '').trim();
+  if (isValidLithuanianPersonalCode(pc)) {
+    fieldScore += 20;
+  } else if (LITHUANIAN_PERSONAL_CODE_DATE_REGEX.test(pc)) {
+    fieldScore += 14;
+  }
+
+  // 2. validPeriod (20 pts): 20 pts if valid YYYY-MM-DD YYYY-MM-DD with startDate <= endDate; 10 pts if single valid YYYY-MM-DD; 0 pts otherwise.
+  const vp = (fields.validPeriod || '').trim();
+  if (vp) {
+    const tokens =
+      vp.match(/\b(?:\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\b/g) || [];
+    const validDates = tokens
+      .map(normalizeSingleDate)
+      .filter((d): d is string => Boolean(d));
+
+    if (validDates.length >= 2) {
+      if (validDates[0] <= validDates[1]) {
+        fieldScore += 20;
+      }
+    } else if (validDates.length === 1) {
+      fieldScore += 10;
+    }
+  }
+
+  // 3. phone (15 pts): 15 pts if matches /^0-\d{3}-\d{5}$/; 7 pts if 8–11 digits; 0 pts otherwise.
+  const ph = (fields.phone || '').trim();
+  if (/^0-\d{3}-\d{5}$/.test(ph)) {
+    fieldScore += 15;
+  } else {
+    const phoneDigits = ph.replace(/\D/g, '');
+    if (phoneDigits.length >= 8 && phoneDigits.length <= 11) {
+      fieldScore += 7;
+    }
+  }
+
+  // 4. licensePlate (15 pts): 15 pts if matches standard Lithuanian plate; 7 pts if >= 4 alphanumeric chars; 0 pts otherwise.
+  const plate = (fields.licensePlate || '').trim().toUpperCase();
+  if (
+    /^[A-Z]{3}\s\d{3}$/.test(plate) ||
+    /^E[A-Z]\d{4}$/.test(plate) ||
+    /^[A-Z]{2}\s?\d{3}$/.test(plate) ||
+    /^\d{3}\s?[A-Z]{2,3}$/.test(plate)
+  ) {
+    fieldScore += 15;
+  } else if (plate.replace(/[^A-Z0-9]/g, '').length >= 4) {
+    fieldScore += 7;
+  }
+
+  // 5. carModel (10 pts): 10 pts if contains a known car make from CAR_MAKES; 5 pts if >= 2 chars; 0 pts otherwise.
+  const model = (fields.carModel || '').trim().toUpperCase();
+  if (model) {
+    const hasKnownMake = CAR_MAKES.some((make) => {
+      const escapedMake = make.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`\\b${escapedMake}\\b`, 'i').test(model);
+    });
+    if (hasKnownMake) {
+      fieldScore += 10;
+    } else if (model.length >= 2) {
+      fieldScore += 5;
+    }
+  }
+
+  // 6. fullName (10 pts): 10 pts if >= 2 words and >= 5 chars; 5 pts if non-empty; 0 pts otherwise.
+  const name = (fields.fullName || '').trim();
+  if (name) {
+    const words = name.split(/\s+/).filter(Boolean);
+    if (words.length >= 2 && name.length >= 5) {
+      fieldScore += 10;
+    } else {
+      fieldScore += 5;
+    }
+  }
+
+  // 7. address (10 pts): 10 pts if contains Lithuanian address markers and >= 6 chars; 5 pts if >= 4 chars; 0 pts otherwise.
+  const addr = (fields.address || '').trim();
+  if (addr) {
+    const addressMarkerRegex =
+      /(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|al\.|k\.|raj\.|sav\.)(?=\s|,|$)|\bLT-\d{5}\b|\b\d+-\d+\b)/i;
+    if (addr.length >= 6 && addressMarkerRegex.test(addr)) {
+      fieldScore += 10;
+    } else if (addr.length >= 4) {
+      fieldScore += 5;
+    }
+  }
+
+  if (typeof ocrConfidence === 'number' && !Number.isNaN(ocrConfidence)) {
+    const clampedConfidence = Math.max(0, Math.min(100, ocrConfidence));
+    return Math.max(0, Math.min(100, Math.round(fieldScore * 0.8 + clampedConfidence * 0.2)));
+  }
+
+  return Math.max(0, Math.min(100, Math.round(fieldScore)));
+}
 
 /**
  * Formats any Lithuanian phone number representation into "0-6XX-XXXXX" (e.g. "0-612-34567").
@@ -195,17 +348,17 @@ export function splitValidPeriod(validPeriod: string): [string, string] {
 }
 
 /**
- * Extracts 11-digit Lithuanian personal code while ignoring +3706... phone numbers.
+ * Extracts all distinct 11-digit Lithuanian personal code candidates while ignoring +3706... phone numbers.
  */
-export function extractPersonalCode(text: string): string {
-  if (!text) return '';
+export function extractPersonalCodeCandidates(text: string): string[] {
+  if (!text) return [];
+  const candidates: string[] = [];
 
-  // 1. Check explicitly labeled personal code first
+  // 1. Check explicitly labeled personal codes first
   const labeledRegex =
-    /(?:a\s*\.\s*k\s*\.?|asmens\s+kodas|personal\s+code|id\s+kodas)[:\s#-]*([1-6]\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{4})\b/i;
-  const labeledMatch = text.match(labeledRegex);
-  if (labeledMatch) {
-    return labeledMatch[1];
+    /(?:a\s*\.\s*k\s*\.?|asmens\s+kodas|personal\s+code|id\s+kodas)[:\s#-]*([1-6]\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{4})\b/gi;
+  for (const match of text.matchAll(labeledRegex)) {
+    addUniqueCandidate(candidates, match[1]);
   }
 
   // 2. Scan all 11-digit valid Lithuanian personal code patterns
@@ -224,26 +377,41 @@ export function extractPersonalCode(text: string): string {
         continue;
       }
     }
-    return candidate;
+    addUniqueCandidate(candidates, candidate);
   }
 
-  return '';
+  return candidates;
 }
 
 /**
- * Extracts and normalizes Lithuanian phone number into "0-6XX-XXXXX".
+ * Extracts 11-digit Lithuanian personal code while ignoring +3706... phone numbers.
  */
-export function extractPhone(text: string, excludePersonalCode = ''): string {
-  if (!text) return '';
+export function extractPersonalCode(text: string): string {
+  return extractPersonalCodeCandidates(text)[0] || '';
+}
+
+/**
+ * Extracts and normalizes all Lithuanian phone number candidates into "0-6XX-XXXXX".
+ */
+export function extractPhoneCandidates(
+  text: string,
+  excludePersonalCodes: string | string[] = ''
+): string[] {
+  if (!text) return [];
+  const candidates: string[] = [];
+  const excludedSet = new Set(
+    (Array.isArray(excludePersonalCodes) ? excludePersonalCodes : [excludePersonalCodes]).filter(
+      Boolean
+    )
+  );
 
   // 1. Look near phone labels first
   const labeledLineRegex =
-    /(?:tel(?:\.|efonas)?|mob(?:\.|ilus)?|phone)[:\s]*((?:\+370|00370|370|8|0)[\s()-]*(?:\d[\s()-]*){7,8})/i;
-  const labeledMatch = text.match(labeledLineRegex);
-  if (labeledMatch) {
+    /(?:tel(?:\.|efonas)?|mob(?:\.|ilus)?|phone)[:\s]*((?:\+370|00370|370|8|0)[\s()-]*(?:\d[\s()-]*){7,8})/gi;
+  for (const labeledMatch of text.matchAll(labeledLineRegex)) {
     const formatted = formatPhoneNumber(labeledMatch[1]);
     if (/^0-\d{3}-\d{5}$/.test(formatted)) {
-      return formatted;
+      addUniqueCandidate(candidates, formatted);
     }
   }
 
@@ -254,29 +422,35 @@ export function extractPhone(text: string, excludePersonalCode = ''): string {
   for (const match of text.matchAll(phoneRegex)) {
     const rawCandidate = match[0];
     const digitsOnly = rawCandidate.replace(/\D/g, '');
-    if (excludePersonalCode && digitsOnly === excludePersonalCode) {
+    if (excludedSet.has(digitsOnly)) {
       continue;
     }
     const formatted = formatPhoneNumber(rawCandidate);
     if (/^0-\d{3}-\d{5}$/.test(formatted)) {
-      return formatted;
+      addUniqueCandidate(candidates, formatted);
     }
   }
 
-  return '';
+  return candidates;
 }
 
 /**
- * Extracts validity period ("YYYY-MM-DD YYYY-MM-DD").
+ * Extracts and normalizes Lithuanian phone number into "0-6XX-XXXXX".
  */
-export function extractValidPeriod(text: string): string {
-  if (!text) return '';
+export function extractPhone(text: string, excludePersonalCode = ''): string {
+  return extractPhoneCandidates(text, excludePersonalCode)[0] || '';
+}
 
+/**
+ * Extracts all validity period candidates ("YYYY-MM-DD YYYY-MM-DD").
+ */
+export function extractValidPeriodCandidates(text: string): string[] {
+  if (!text) return [];
+  const candidates: string[] = [];
   const lines = text.split(/\r?\n/);
 
   // 1. Prioritize lines with validity keywords
   const validityKeywords = /(?:galioj|laikotarp|nuo\b|iki\b|valid|period|term)/i;
-  const keywordDates: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -284,20 +458,24 @@ export function extractValidPeriod(text: string): string {
       const combinedWindow = [line, lines[i + 1] || ''].join(' ');
       const dateTokens =
         combinedWindow.match(/\b(?:\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\b/g) || [];
+      const windowDates: string[] = [];
       for (const token of dateTokens) {
         const iso = normalizeSingleDate(token);
-        if (iso && !keywordDates.includes(iso)) {
-          keywordDates.push(iso);
+        if (iso && !windowDates.includes(iso)) {
+          windowDates.push(iso);
         }
       }
-      if (keywordDates.length >= 2) {
-        const [d1, d2] = keywordDates;
-        return d1 <= d2 ? `${d1} ${d2}` : `${d2} ${d1}`;
+      if (windowDates.length >= 2) {
+        const [d1, d2] = windowDates;
+        addUniqueCandidate(candidates, d1 <= d2 ? `${d1} ${d2}` : `${d2} ${d1}`);
+      } else if (windowDates.length === 1) {
+        const d1 = windowDates[0];
+        addUniqueCandidate(candidates, `${d1} ${addOneYearToDate(d1)}`);
       }
     }
   }
 
-  // 2. Fallback: scan all dates in text
+  // 2. Scan all dates in text
   const allTokens =
     text.match(/\b(?:\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\b/g) || [];
   const allIso: string[] = [];
@@ -309,56 +487,71 @@ export function extractValidPeriod(text: string): string {
   }
 
   if (allIso.length >= 2) {
-    const [d1, d2] = allIso.slice(0, 2);
-    return d1 <= d2 ? `${d1} ${d2}` : `${d2} ${d1}`;
-  }
-
-  if (allIso.length === 1) {
+    for (let i = 0; i + 1 < allIso.length; i++) {
+      const d1 = allIso[i];
+      const d2 = allIso[i + 1];
+      addUniqueCandidate(candidates, d1 <= d2 ? `${d1} ${d2}` : `${d2} ${d1}`);
+    }
+  } else if (allIso.length === 1) {
     const start = allIso[0];
-    return `${start} ${addOneYearToDate(start)}`;
+    addUniqueCandidate(candidates, `${start} ${addOneYearToDate(start)}`);
   }
 
-  return '';
+  return candidates;
 }
 
 /**
- * Extracts Lithuanian license plate (e.g. "ABC 123", "EA1234").
+ * Extracts validity period ("YYYY-MM-DD YYYY-MM-DD").
  */
-export function extractLicensePlate(text: string): string {
-  if (!text) return '';
+export function extractValidPeriod(text: string): string {
+  return extractValidPeriodCandidates(text)[0] || '';
+}
 
-  // 1. Check explicitly labeled plate first
+/**
+ * Extracts all Lithuanian license plate candidates (e.g. "ABC 123", "EA1234").
+ */
+export function extractLicensePlateCandidates(text: string): string[] {
+  if (!text) return [];
+  const candidates: string[] = [];
+
+  // 1. Check explicitly labeled plates first
   const labeledRegex =
-    /(?:valst\.?\s*nr\.?|valstybinis\s*nr\.?|reg\.?\s*nr\.?|plate(?:\s*no\.?)?)[:\s#-]*([A-Z]{2,3}[\s-]?\d{3}|\bE[A-Z]\d{4}\b|\b\d{3}[\s-]?[A-Z]{2,3}\b)/i;
-  const labeledMatch = text.match(labeledRegex);
-  if (labeledMatch) {
+    /(?:valst\.?\s*nr\.?|valstybinis\s*nr\.?|reg\.?\s*nr\.?|plate(?:\s*no\.?)?)[:\s#-]*([A-Z]{2,3}[\s-]?\d{3}|\bE[A-Z]\d{4}\b|\b\d{3}[\s-]?[A-Z]{2,3}\b)/gi;
+  for (const labeledMatch of text.matchAll(labeledRegex)) {
     const rawPlate = labeledMatch[1].toUpperCase().replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
     const stdMatch = rawPlate.match(/^([A-Z]{3})\s*(\d{3})$/);
-    if (stdMatch) return `${stdMatch[1]} ${stdMatch[2]}`;
-    return rawPlate;
+    addUniqueCandidate(candidates, stdMatch ? `${stdMatch[1]} ${stdMatch[2]}` : rawPlate);
   }
 
   // 2. Scan lines for standard Lithuanian plates (ABC 123 / ABC123 / EA1234)
   const plateCandidates = text.matchAll(/\b([A-Z]{3})[\s-]?(\d{3})\b|\b(E[A-Z]\d{4})\b/g);
   for (const match of plateCandidates) {
     if (match[3]) {
-      return match[3].toUpperCase();
+      addUniqueCandidate(candidates, match[3].toUpperCase());
+      continue;
     }
     const letters = match[1].toUpperCase();
     const digits = match[2];
     if (FALSE_POSITIVE_PLATES.has(letters)) continue;
-    return `${letters} ${digits}`;
+    addUniqueCandidate(candidates, `${letters} ${digits}`);
   }
 
-  return '';
+  return candidates;
 }
 
 /**
- * Extracts Vehicle Make & Model (e.g. "TOYOTA COROLLA", "VOLKSWAGEN PASSAT").
+ * Extracts Lithuanian license plate (e.g. "ABC 123", "EA1234").
  */
-export function extractCarModel(text: string): string {
-  if (!text) return '';
+export function extractLicensePlate(text: string): string {
+  return extractLicensePlateCandidates(text)[0] || '';
+}
 
+/**
+ * Extracts all Vehicle Make & Model candidates (e.g. "TOYOTA COROLLA", "VOLKSWAGEN PASSAT").
+ */
+export function extractCarModelCandidates(text: string): string[] {
+  if (!text) return [];
+  const candidates: string[] = [];
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 
   // 1. Look for known car makes across all lines
@@ -381,7 +574,15 @@ export function extractCarModel(text: string): string {
           .replace(/[,:;]+$/, '')
           .trim();
 
-        return rawModel ? `${detectedMake} ${rawModel.toUpperCase()}` : detectedMake;
+        const formatted = rawModel ? `${detectedMake} ${rawModel.toUpperCase()}` : detectedMake;
+        // Avoid adding bare 'MERCEDES' if 'MERCEDES-BENZ ...' was already added from the same line
+        if (
+          formatted === 'MERCEDES' &&
+          candidates.some((c) => c.startsWith('MERCEDES-BENZ') || c.startsWith('MERCEDES BENZ'))
+        ) {
+          continue;
+        }
+        addUniqueCandidate(candidates, formatted);
       }
     }
   }
@@ -396,33 +597,59 @@ export function extractCarModel(text: string): string {
         .replace(/\b(?:valst|nr|vin)\b.*$/i, '')
         .trim()
         .toUpperCase();
-      if (cleaned.length >= 2) return cleaned;
+      if (cleaned.length >= 2) {
+        addUniqueCandidate(candidates, cleaned);
+      }
     }
   }
 
-  return '';
+  return candidates;
 }
 
 /**
- * Extracts Lithuanian address line.
+ * Extracts Vehicle Make & Model (e.g. "TOYOTA COROLLA", "VOLKSWAGEN PASSAT").
  */
-export function extractAddress(text: string): string {
-  if (!text) return '';
+export function extractCarModel(text: string): string {
+  return extractCarModelCandidates(text)[0] || '';
+}
+
+function splitMultipleStreetAddressesInLine(cleanedLine: string): string[] {
+  const streetWithNumberRegex =
+    /(?:(?:^|\s)(?:g\.|gatvė|pr\.|prospektas|al\.|alėja|skg\.|pl\.|plentas)\s*\d+)/i;
+  const parts = cleanedLine
+    .split(/[;,]/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length >= 2 && parts.every((p) => streetWithNumberRegex.test(p))) {
+    return parts;
+  }
+  return [cleanedLine];
+}
+
+/**
+ * Extracts all Lithuanian address candidates from text.
+ */
+export function extractAddressCandidates(text: string): string[] {
+  if (!text) return [];
+  const candidates: string[] = [];
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 
-  // 1. Explicitly labeled address
+  // 1. Explicitly labeled addresses
   for (const line of lines) {
     const labeled = line.match(
       /(?:adresas|gyv\.?\s*vieta|deklaruota\s+gyv\.?\s*vieta|address)[:\s-]+(.+)$/i
     );
     if (labeled && labeled[1].trim().length >= 4) {
-      return labeled[1].trim().replace(/\s+/g, ' ');
+      const normalizedLine = labeled[1].trim().replace(/\s+/g, ' ');
+      for (const addr of splitMultipleStreetAddressesInLine(normalizedLine)) {
+        addUniqueCandidate(candidates, addr);
+      }
     }
   }
 
-  // 2. Street / settlement / postal code heuristics
+  // 2. Street / settlement / postal code heuristics across all lines
   const addressIndicator =
-    /(?:\b(?:g\.|gatvė|pr\.|prospektas|al\.|alėja|skg\.|pl\.|plentas|a\.|aikštė|k\.|kaimas|mstl\.|raj\.|sav\.)\b|\bLT-\d{5}\b)/i;
+    /(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|prospektas|al\.|alėja|skg\.|pl\.|plentas|a\.|aikštė|k\.|kaimas|mstl\.|raj\.|sav\.)(?=\s|,|$)|\bLT-\d{5}\b)/i;
 
   for (const line of lines) {
     if (addressIndicator.test(line)) {
@@ -430,21 +657,32 @@ export function extractAddress(text: string): string {
       if (/\b(?:UAB|AB\s+draudimas|SEB|Swedbank|Luminor)\b/i.test(line) && !/adresas/i.test(line)) {
         continue;
       }
-      return line
-        .replace(/^(?:adresas|gyv\.?\s*vieta)[:\s-]*/i, '')
+      const cleaned = line
+        .replace(/^(?:adresas|gyv\.?\s*vieta|deklaruota\s+gyv\.?\s*vieta|address)[:\s-]*/i, '')
         .trim()
         .replace(/\s+/g, ' ');
+      for (const addr of splitMultipleStreetAddressesInLine(cleaned)) {
+        addUniqueCandidate(candidates, addr);
+      }
     }
   }
 
-  return '';
+  return candidates;
 }
 
 /**
- * Extracts Full Name (Vardas Pavardė).
+ * Extracts Lithuanian address line.
  */
-export function extractFullName(text: string): string {
-  if (!text) return '';
+export function extractAddress(text: string): string {
+  return extractAddressCandidates(text)[0] || '';
+}
+
+/**
+ * Extracts all Full Name (Vardas Pavardė) candidates.
+ */
+export function extractFullNameCandidates(text: string): string[] {
+  if (!text) return [];
+  const candidates: string[] = [];
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 
   // 1. Check labeled name fields first
@@ -454,7 +692,7 @@ export function extractFullName(text: string): string {
   for (const line of lines) {
     const match = line.match(nameLabelRegex);
     if (match) {
-      return match[1].replace(/\s+/g, ' ').trim();
+      addUniqueCandidate(candidates, match[1].replace(/\s+/g, ' ').trim());
     }
   }
 
@@ -486,7 +724,7 @@ export function extractFullName(text: string): string {
 
   for (const line of lines) {
     // Skip lines that look like addresses or vehicle models
-    if (/\b(?:g\.|gatvė|pr\.|al\.|LT-\d{5})\b/i.test(line)) continue;
+    if (/(?:(?:^|\s|,)(?:g\.|gatvė|pr\.|al\.)(?=\s|,|$)|\bLT-\d{5}\b)/i.test(line)) continue;
     for (const match of line.matchAll(lithuanianNameRegex)) {
       const first = match[1];
       const last = match[2];
@@ -497,25 +735,33 @@ export function extractFullName(text: string): string {
           last
         )
       ) {
-        return `${first} ${last}`;
+        addUniqueCandidate(candidates, `${first} ${last}`);
       }
     }
   }
 
-  return '';
+  return candidates;
 }
 
 /**
- * Master parser that extracts all 7 structured fields from raw OCR or pasted text.
+ * Extracts Full Name (Vardas Pavardė).
  */
-export function parseDocumentText(rawText: string): ParsedDocumentFields {
-  const personalCode = extractPersonalCode(rawText);
-  const phone = extractPhone(rawText, personalCode);
-  const validPeriod = extractValidPeriod(rawText);
-  const licensePlate = extractLicensePlate(rawText);
-  const carModel = extractCarModel(rawText);
-  const address = extractAddress(rawText);
-  const fullName = extractFullName(rawText);
+export function extractFullName(text: string): string {
+  return extractFullNameCandidates(text)[0] || '';
+}
+
+/**
+ * Collects all distinct candidate values found in the text for each of the 7 fields,
+ * deduplicated and ordered by priority.
+ */
+export function parseDocumentCandidates(rawText: string): ParsedDocumentCandidates {
+  const personalCode = extractPersonalCodeCandidates(rawText);
+  const phone = extractPhoneCandidates(rawText, personalCode);
+  const validPeriod = extractValidPeriodCandidates(rawText);
+  const licensePlate = extractLicensePlateCandidates(rawText);
+  const carModel = extractCarModelCandidates(rawText);
+  const address = extractAddressCandidates(rawText);
+  const fullName = extractFullNameCandidates(rawText);
 
   return {
     fullName,
@@ -525,5 +771,23 @@ export function parseDocumentText(rawText: string): ParsedDocumentFields {
     carModel,
     validPeriod,
     personalCode,
+  };
+}
+
+/**
+ * Master parser that extracts all 7 structured fields from raw OCR or pasted text.
+ * Returns the primary (1st) candidate for each field.
+ */
+export function parseDocumentText(rawText: string): ParsedDocumentFields {
+  const candidates = parseDocumentCandidates(rawText);
+
+  return {
+    fullName: candidates.fullName[0] || '',
+    address: candidates.address[0] || '',
+    phone: candidates.phone[0] || '',
+    licensePlate: candidates.licensePlate[0] || '',
+    carModel: candidates.carModel[0] || '',
+    validPeriod: candidates.validPeriod[0] || '',
+    personalCode: candidates.personalCode[0] || '',
   };
 }

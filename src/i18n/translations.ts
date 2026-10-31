@@ -15,6 +15,7 @@ export interface Translations {
     carModel: string;
     validPeriod: string;
     personalCode: string;
+    accuracyScore: string;
     actions: string;
   };
   placeholders: {
@@ -92,6 +93,7 @@ export const translations: Record<Language, Translations> = {
       carModel: 'Modelis',
       validPeriod: 'Galiojimas',
       personalCode: 'Asmens kodas',
+      accuracyScore: 'Tikslumas',
       actions: 'Veiksmai',
     },
     placeholders: {
@@ -169,6 +171,7 @@ export const translations: Record<Language, Translations> = {
       carModel: 'Car Model',
       validPeriod: 'Validity Period',
       personalCode: 'Personal Code',
+      accuracyScore: 'Accuracy',
       actions: 'Actions',
     },
     placeholders: {

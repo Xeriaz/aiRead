@@ -9,6 +9,7 @@ export interface TableRecord {
   carModel: string;      // Modelis
   validPeriod: string;   // Galiojimas (YYYY-MM-DD YYYY-MM-DD)
   personalCode: string;  // Asmens kodas (11 digits)
+  accuracyScore?: number; // Tikslumas (0-100 integer)
   createdAt: string;
   updatedAt: string;
 }
@@ -32,6 +33,12 @@ export class AiReadDatabase extends Dexie {
       scans: null,
       records:
         '++id, fullName, address, phone, licensePlate, carModel, validPeriod, personalCode, createdAt, updatedAt',
+      settings: 'key',
+    });
+    this.version(3).stores({
+      scans: null,
+      records:
+        '++id, fullName, address, phone, licensePlate, carModel, validPeriod, personalCode, accuracyScore, createdAt, updatedAt',
       settings: 'key',
     });
   }

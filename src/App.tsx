@@ -26,13 +26,16 @@ import { db, type TableRecord } from './db/db';
 import { translations, type Language } from './i18n/translations';
 import {
   addOneYearToDate,
+  calculateAccuracyScore,
   formatPhoneNumber,
   formatValidPeriod,
+  parseDocumentCandidates,
   parseDocumentText,
   splitValidPeriod,
+  type ParsedDocumentCandidates,
   type ParsedDocumentFields,
 } from './utils/parser';
-import { extractTextFromImageFile } from './utils/ocr';
+import { extractTextAndConfidenceFromImageFile } from './utils/ocr';
 import { exportToCsv, exportToJson, exportToXlsx } from './utils/export';
 
 type Tab = 'table' | 'import' | 'settings';
@@ -48,6 +51,16 @@ const EMPTY_FORM: ParsedDocumentFields = {
   personalCode: '',
 };
 
+const EMPTY_CANDIDATES: ParsedDocumentCandidates = {
+  fullName: [],
+  address: [],
+  phone: [],
+  licensePlate: [],
+  carModel: [],
+  validPeriod: [],
+  personalCode: [],
+};
+
 function getValidityStatus(validPeriod: string): 'active' | 'expiring' | 'expired' | 'none' {
   const [, end] = splitValidPeriod(validPeriod);
   if (!end || !/^\d{4}-\d{2}-\d{2}$/.test(end)) return 'none';
@@ -59,6 +72,16 @@ function getValidityStatus(validPeriod: string): 'active' | 'expiring' | 'expire
   if (diffDays < 0) return 'expired';
   if (diffDays <= 30) return 'expiring';
   return 'active';
+}
+
+function getAccuracyBadgeClasses(score: number): string {
+  if (score >= 80) {
+    return 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30';
+  }
+  if (score >= 50) {
+    return 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30';
+  }
+  return 'bg-red-500/15 text-red-700 dark:text-red-300 border border-red-500/30';
 }
 
 export default function App() {
@@ -84,6 +107,9 @@ export default function App() {
   // Import / OCR tab state (Zero image persistence)
   const [rawOcrText, setRawOcrText] = useState('');
   const [importFields, setImportFields] = useState<ParsedDocumentFields>(EMPTY_FORM);
+  const [importCandidates, setImportCandidates] =
+    useState<ParsedDocumentCandidates>(EMPTY_CANDIDATES);
+  const [importOcrConfidence, setImportOcrConfidence] = useState<number | undefined>(undefined);
   const [isProcessingOcr, setIsProcessingOcr] = useState(false);
   const [ocrProgress, setOcrProgress] = useState(0);
   const [lastScannedFileName, setLastScannedFileName] = useState('');
@@ -178,15 +204,18 @@ export default function App() {
     const hasAnyValue = Object.values(normalized).some((v) => v.length > 0);
     if (!hasAnyValue) return;
 
+    const accuracyScore = calculateAccuracyScore(normalized);
     const now = new Date().toISOString();
     if (editingId !== null) {
       await db.records.update(editingId, {
         ...normalized,
+        accuracyScore,
         updatedAt: now,
       });
     } else {
       await db.records.add({
         ...normalized,
+        accuracyScore,
         createdAt: now,
         updatedAt: now,
       });
@@ -200,6 +229,7 @@ export default function App() {
 
   const handleDuplicateRecord = async (rec: TableRecord) => {
     const now = new Date().toISOString();
+    const accuracyScore = rec.accuracyScore ?? calculateAccuracyScore(rec);
     await db.records.add({
       fullName: rec.fullName,
       address: rec.address,
@@ -208,6 +238,7 @@ export default function App() {
       carModel: rec.carModel,
       validPeriod: rec.validPeriod,
       personalCode: rec.personalCode,
+      accuracyScore,
       createdAt: now,
       updatedAt: now,
     });
@@ -238,8 +269,13 @@ export default function App() {
     setOcrProgress(5);
 
     try {
-      const text = await extractTextFromImageFile(file, (p) => setOcrProgress(p));
+      const { text, confidence } = await extractTextAndConfidenceFromImageFile(file, (p) =>
+        setOcrProgress(p)
+      );
       setRawOcrText(text);
+      setImportOcrConfidence(confidence);
+      const candidates = parseDocumentCandidates(text);
+      setImportCandidates(candidates);
       const parsed = parseDocumentText(text);
       setImportFields(parsed);
     } finally {
@@ -250,6 +286,9 @@ export default function App() {
 
   const handleRawTextChange = (text: string) => {
     setRawOcrText(text);
+    setImportOcrConfidence(undefined);
+    const candidates = parseDocumentCandidates(text);
+    setImportCandidates(candidates);
     const parsed = parseDocumentText(text);
     setImportFields(parsed);
   };
@@ -260,9 +299,11 @@ export default function App() {
     const hasAnyValue = Object.values(normalized).some((v) => v.length > 0);
     if (!hasAnyValue) return;
 
+    const accuracyScore = calculateAccuracyScore(normalized, importOcrConfidence);
     const now = new Date().toISOString();
     await db.records.add({
       ...normalized,
+      accuracyScore,
       createdAt: now,
       updatedAt: now,
     });
@@ -270,6 +311,8 @@ export default function App() {
     // Clear all transient OCR text and fields
     setRawOcrText('');
     setImportFields(EMPTY_FORM);
+    setImportCandidates(EMPTY_CANDIDATES);
+    setImportOcrConfidence(undefined);
     setLastScannedFileName('');
     await loadRecords();
     setActiveTab('table');
@@ -291,15 +334,50 @@ export default function App() {
   };
 
   const setImportFieldsFromRaw = () => {
+    const candidates = parseDocumentCandidates(rawOcrText);
+    setImportCandidates(candidates);
     const parsed = parseDocumentText(rawOcrText);
     setImportFields(parsed);
+  };
+
+  const renderCandidateChips = (
+    fieldKey: keyof ParsedDocumentFields,
+    currentValue: string,
+    candidates: ParsedDocumentCandidates | undefined,
+    onSelect: (val: string) => void
+  ) => {
+    if (!candidates) return null;
+    const fieldCandidates = candidates[fieldKey] || [];
+    const alternatives = fieldCandidates.filter(
+      (c) => c.trim().toLowerCase() !== currentValue.trim().toLowerCase()
+    );
+    if (alternatives.length === 0) return null;
+
+    return (
+      <div
+        className="flex flex-wrap items-center gap-1.5 mt-1.5"
+        data-testid={`candidates-${fieldKey}`}
+      >
+        {alternatives.map((candidate) => (
+          <button
+            key={candidate}
+            type="button"
+            onClick={() => onSelect(candidate)}
+            className="touch-press inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-medium bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300 border border-indigo-500/25 transition-colors"
+          >
+            <span>{candidate}</span>
+          </button>
+        ))}
+      </div>
+    );
   };
 
   const renderRecordFieldsEditor = (
     values: ParsedDocumentFields,
     onChange: React.Dispatch<React.SetStateAction<ParsedDocumentFields>>,
     target: 'modal' | 'import',
-    idPrefix: string
+    idPrefix: string,
+    candidates?: ParsedDocumentCandidates
   ) => {
     const [startDate, endDate] = splitValidPeriod(values.validPeriod);
 
@@ -331,6 +409,9 @@ export default function App() {
             placeholder={t.placeholders.fullName}
             className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
+          {renderCandidateChips('fullName', values.fullName, candidates, (val) =>
+            onChange((prev) => ({ ...prev, fullName: val }))
+          )}
         </div>
 
         {/* Asmens kodas */}
@@ -356,6 +437,9 @@ export default function App() {
             placeholder={t.placeholders.personalCode}
             className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
+          {renderCandidateChips('personalCode', values.personalCode, candidates, (val) =>
+            onChange((prev) => ({ ...prev, personalCode: val }))
+          )}
         </div>
 
         {/* Telefonas */}
@@ -377,6 +461,9 @@ export default function App() {
             placeholder={t.placeholders.phone}
             className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
+          {renderCandidateChips('phone', values.phone, candidates, (val) =>
+            onChange((prev) => ({ ...prev, phone: formatPhoneNumber(val) }))
+          )}
         </div>
 
         {/* Adresas */}
@@ -395,6 +482,9 @@ export default function App() {
             placeholder={t.placeholders.address}
             className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
+          {renderCandidateChips('address', values.address, candidates, (val) =>
+            onChange((prev) => ({ ...prev, address: val }))
+          )}
         </div>
 
         {/* Valst. Nr. */}
@@ -415,6 +505,9 @@ export default function App() {
             placeholder={t.placeholders.licensePlate}
             className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
+          {renderCandidateChips('licensePlate', values.licensePlate, candidates, (val) =>
+            onChange((prev) => ({ ...prev, licensePlate: val.toUpperCase() }))
+          )}
         </div>
 
         {/* Modelis */}
@@ -435,6 +528,9 @@ export default function App() {
             placeholder={t.placeholders.carModel}
             className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
+          {renderCandidateChips('carModel', values.carModel, candidates, (val) =>
+            onChange((prev) => ({ ...prev, carModel: val.toUpperCase() }))
+          )}
         </div>
 
         {/* Galiojimas (YYYY-MM-DD YYYY-MM-DD) */}
@@ -469,6 +565,9 @@ export default function App() {
             placeholder={t.placeholders.validPeriod}
             className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
+          {renderCandidateChips('validPeriod', values.validPeriod, candidates, (val) =>
+            onChange((prev) => ({ ...prev, validPeriod: formatValidPeriod(val) }))
+          )}
           <div className="grid grid-cols-2 gap-2">
             <div>
               <span className="block text-[10px] text-slate-400 mb-0.5">
@@ -497,6 +596,12 @@ export default function App() {
       </div>
     );
   };
+
+  const liveImportScore = calculateAccuracyScore(
+    normalizeRecordFields(importFields),
+    importOcrConfidence
+  );
+  const liveModalScore = calculateAccuracyScore(normalizeRecordFields(formFields));
 
   return (
     <div className="min-h-dvh w-full max-w-full flex flex-col bg-slate-50 dark:bg-zinc-950 text-slate-900 dark:text-zinc-50 transition-colors overflow-x-hidden">
@@ -669,7 +774,7 @@ export default function App() {
                 </p>
               </div>
             ) : viewMode === 'table' ? (
-              /* Full 8-Column CRUD Table inside smooth horizontal container */
+              /* Full CRUD Table inside smooth horizontal container */
               <div className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-2xs overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse text-xs">
@@ -683,12 +788,14 @@ export default function App() {
                         <th className="py-2.5 px-3">{t.columns.carModel}</th>
                         <th className="py-2.5 px-3">{t.columns.validPeriod}</th>
                         <th className="py-2.5 px-3">{t.columns.personalCode}</th>
+                        <th className="py-2.5 px-3 text-center">{t.columns.accuracyScore}</th>
                         <th className="py-2.5 px-2.5 text-right">{t.columns.actions}</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-zinc-800/70">
                       {filteredRecords.map((rec, index) => {
                         const status = getValidityStatus(rec.validPeriod);
+                        const score = rec.accuracyScore ?? calculateAccuracyScore(rec);
                         return (
                           <tr
                             key={rec.id ?? index}
@@ -734,6 +841,16 @@ export default function App() {
                             <td className="py-2.5 px-3 font-mono whitespace-nowrap">
                               {rec.personalCode || '—'}
                             </td>
+                            <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                              <span
+                                data-testid={`accuracy-badge-${index + 1}`}
+                                className={`inline-flex items-center justify-center px-2 py-0.5 rounded-full font-mono text-[11px] font-semibold ${getAccuracyBadgeClasses(
+                                  score
+                                )}`}
+                              >
+                                {score}%
+                              </span>
+                            </td>
                             <td className="py-2.5 px-2.5 text-right whitespace-nowrap">
                               <div className="inline-flex items-center justify-end gap-1">
                                 <button
@@ -772,82 +889,92 @@ export default function App() {
             ) : (
               /* iPhone 16 Pro Compact Card Grid View (zero horizontal scrolling) */
               <div className="space-y-2.5">
-                {filteredRecords.map((rec, index) => (
-                  <div
-                    key={rec.id ?? index}
-                    className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-3.5 shadow-2xs space-y-2"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="w-6 h-6 shrink-0 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-mono text-xs font-bold flex items-center justify-center">
-                          {index + 1}
-                        </span>
-                        <div className="min-w-0">
-                          <h3 className="text-sm font-semibold truncate">
-                            {rec.fullName || '—'}
-                          </h3>
-                          {rec.personalCode && (
-                            <p className="text-[11px] font-mono text-slate-500 dark:text-zinc-400">
-                              {t.columns.personalCode}: {rec.personalCode}
-                            </p>
+                {filteredRecords.map((rec, index) => {
+                  const score = rec.accuracyScore ?? calculateAccuracyScore(rec);
+                  return (
+                    <div
+                      key={rec.id ?? index}
+                      className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-3.5 shadow-2xs space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="w-6 h-6 shrink-0 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-mono text-xs font-bold flex items-center justify-center">
+                            {index + 1}
+                          </span>
+                          <div className="min-w-0">
+                            <h3 className="text-sm font-semibold truncate">
+                              {rec.fullName || '—'}
+                            </h3>
+                            {rec.personalCode && (
+                              <p className="text-[11px] font-mono text-slate-500 dark:text-zinc-400">
+                                {t.columns.personalCode}: {rec.personalCode}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span
+                            className={`inline-flex items-center justify-center px-2 py-0.5 rounded-full font-mono text-[11px] font-semibold ${getAccuracyBadgeClasses(
+                              score
+                            )}`}
+                          >
+                            {score}%
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => openEditRecordModal(rec)}
+                            aria-label={`${t.actions.edit} ${rec.fullName || index + 1}`}
+                            className="touch-press p-1.5 rounded-lg text-slate-500 hover:text-indigo-600"
+                          >
+                            <Edit3 className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteRecord(rec.id)}
+                            aria-label={`${t.actions.delete} ${rec.fullName || index + 1}`}
+                            className="touch-press p-1.5 rounded-lg text-slate-500 hover:text-red-600"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5 text-xs pt-1 border-t border-slate-100 dark:border-zinc-800/80">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <Car className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                          <span className="font-mono font-semibold truncate">
+                            {rec.licensePlate || '—'}
+                          </span>
+                          {rec.carModel && (
+                            <span className="text-slate-500 dark:text-zinc-400 truncate">
+                              · {rec.carModel}
+                            </span>
                           )}
                         </div>
-                      </div>
 
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => openEditRecordModal(rec)}
-                          aria-label={`${t.actions.edit} ${rec.fullName || index + 1}`}
-                          className="touch-press p-1.5 rounded-lg text-slate-500 hover:text-indigo-600"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteRecord(rec.id)}
-                          aria-label={`${t.actions.delete} ${rec.fullName || index + 1}`}
-                          className="touch-press p-1.5 rounded-lg text-slate-500 hover:text-red-600"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
+                        <div className="flex items-center gap-1.5 justify-end min-w-0">
+                          <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          <span className="font-mono truncate">{rec.phone || '—'}</span>
+                        </div>
 
-                    <div className="grid grid-cols-2 gap-1.5 text-xs pt-1 border-t border-slate-100 dark:border-zinc-800/80">
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <Car className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                        <span className="font-mono font-semibold truncate">
-                          {rec.licensePlate || '—'}
-                        </span>
-                        {rec.carModel && (
-                          <span className="text-slate-500 dark:text-zinc-400 truncate">
-                            · {rec.carModel}
-                          </span>
+                        {rec.address && (
+                          <div className="col-span-2 flex items-center gap-1.5 text-slate-600 dark:text-zinc-300 min-w-0">
+                            <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span className="truncate">{rec.address}</span>
+                          </div>
+                        )}
+
+                        {rec.validPeriod && (
+                          <div className="col-span-2 flex items-center gap-1.5 font-mono text-[11px] text-slate-600 dark:text-zinc-300">
+                            <Calendar className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                            <span>{rec.validPeriod}</span>
+                          </div>
                         )}
                       </div>
-
-                      <div className="flex items-center gap-1.5 justify-end min-w-0">
-                        <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                        <span className="font-mono truncate">{rec.phone || '—'}</span>
-                      </div>
-
-                      {rec.address && (
-                        <div className="col-span-2 flex items-center gap-1.5 text-slate-600 dark:text-zinc-300 min-w-0">
-                          <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span className="truncate">{rec.address}</span>
-                        </div>
-                      )}
-
-                      {rec.validPeriod && (
-                        <div className="col-span-2 flex items-center gap-1.5 font-mono text-[11px] text-slate-600 dark:text-zinc-300">
-                          <Calendar className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                          <span>{rec.validPeriod}</span>
-                        </div>
-                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -936,11 +1063,28 @@ export default function App() {
                 onSubmit={handleSaveImportedRecord}
                 className="space-y-3 pt-2 border-t border-slate-100 dark:border-zinc-800"
               >
-                <h3 className="text-xs font-semibold text-slate-700 dark:text-zinc-300">
-                  {t.labels.verifiedFields}
-                </h3>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-xs font-semibold text-slate-700 dark:text-zinc-300">
+                    {t.labels.verifiedFields}
+                  </h3>
+                  <span
+                    data-testid="import-accuracy-badge"
+                    className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-mono text-[11px] font-semibold ${getAccuracyBadgeClasses(
+                      liveImportScore
+                    )}`}
+                  >
+                    <span>{t.columns.accuracyScore}:</span>
+                    <span>{liveImportScore}%</span>
+                  </span>
+                </div>
 
-                {renderRecordFieldsEditor(importFields, setImportFields, 'import', 'import')}
+                {renderRecordFieldsEditor(
+                  importFields,
+                  setImportFields,
+                  'import',
+                  'import',
+                  importCandidates
+                )}
 
                 <div className="flex items-center gap-2 pt-2">
                   <button
@@ -954,6 +1098,8 @@ export default function App() {
                     onClick={() => {
                       setRawOcrText('');
                       setImportFields(EMPTY_FORM);
+                      setImportCandidates(EMPTY_CANDIDATES);
+                      setImportOcrConfidence(undefined);
                       setLastScannedFileName('');
                     }}
                     className="touch-press py-2.5 px-3.5 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-medium"
@@ -1066,9 +1212,20 @@ export default function App() {
         >
           <div className="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 pb-safe shadow-xl space-y-3">
             <div className="flex items-center justify-between border-b border-slate-100 dark:border-zinc-800 pb-2.5">
-              <h2 className="text-sm font-semibold">
-                {editingId !== null ? t.labels.editRecordTitle : t.labels.newRecordTitle}
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-semibold">
+                  {editingId !== null ? t.labels.editRecordTitle : t.labels.newRecordTitle}
+                </h2>
+                <span
+                  data-testid="modal-accuracy-badge"
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-mono text-[11px] font-semibold ${getAccuracyBadgeClasses(
+                    liveModalScore
+                  )}`}
+                >
+                  <span>{t.columns.accuracyScore}:</span>
+                  <span>{liveModalScore}%</span>
+                </span>
+              </div>
               <button
                 type="button"
                 onClick={() => setIsModalOpen(false)}

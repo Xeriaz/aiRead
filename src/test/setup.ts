@@ -42,6 +42,22 @@ if (typeof window !== 'undefined' && (!window.localStorage || typeof window.loca
   });
 }
 
+if (typeof URL.createObjectURL !== 'function') {
+  Object.defineProperty(URL, 'createObjectURL', {
+    value: vi.fn(() => 'blob:mock-url'),
+    configurable: true,
+    writable: true,
+  });
+}
+
+if (typeof URL.revokeObjectURL !== 'function') {
+  Object.defineProperty(URL, 'revokeObjectURL', {
+    value: vi.fn(),
+    configurable: true,
+    writable: true,
+  });
+}
+
 beforeEach(async () => {
   await Promise.all(db.tables.map((table) => table.clear()));
   localStorage.clear();
