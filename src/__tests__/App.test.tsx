@@ -572,4 +572,26 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
     expect(document.documentElement.classList.contains('dark')).toBe(true);
     expect(localStorage.getItem('aiRead_theme')).toBe('dark');
   });
+
+  it('opens RecordModal and closes on Escape and backdrop-click', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    // Click Add New button
+    await user.click(screen.getByRole('button', { name: /Naujas įrašas/i }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    // Press Escape
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    // Open again
+    await user.click(screen.getByRole('button', { name: /Naujas įrašas/i }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toBeInTheDocument();
+
+    // Click backdrop
+    await user.click(dialog);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
 });
