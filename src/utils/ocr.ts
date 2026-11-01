@@ -235,9 +235,7 @@ export async function extractTextAndConfidenceFromImageFile(
     return extractTextAndConfidenceFromPdfFile(file, onProgress);
   }
 
-  const objectUrl = URL.createObjectURL(file);
   const resourceHandle: EphemeralResourceHandle = {
-    objectUrl,
     canvas: null,
   };
   const releaseImageResources = registerEphemeralResource(resourceHandle, IMAGE_MEMORY_TTL_MS);
@@ -245,9 +243,9 @@ export async function extractTextAndConfidenceFromImageFile(
   try {
     currentProgressCallback = onProgress ?? null;
     onProgress?.(5);
-    const processedSource = await preprocessImageInMemory(objectUrl, (c) => {
+    const processedSource = await preprocessImageInMemory(file, (c) => {
       resourceHandle.canvas = c;
-    });
+    }, resourceHandle);
 
     onProgress?.(15);
     const worker = await getOrCreateWarmWorker();
@@ -308,41 +306,151 @@ export async function extractTextFromImageFile(
  */
 export const extractTextAndConfidenceFromFile = extractTextAndConfidenceFromImageFile;
 
-async function preprocessImageInMemory(
-  objectUrl: string,
-  registerCanvas: (canvas: HTMLCanvasElement) => void
-): Promise<HTMLCanvasElement | string> {
-  if (typeof document === 'undefined') {
-    return objectUrl;
+function applyImageEnhancements(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  padding: number
+): void {
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imageData.data;
+  const canvasWidth = canvas.width;
+  const canvasHeight = canvas.height;
+
+  // Grayscale + dynamic contrast boost
+  const contrast = 1.45;
+  const intercept = 128 * (1 - contrast);
+
+  const grayBuffer = new Uint8Array(canvasWidth * canvasHeight);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const luminance = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    const boosted = Math.max(0, Math.min(255, luminance * contrast + intercept));
+    data[i] = boosted;
+    data[i + 1] = boosted;
+    data[i + 2] = boosted;
+    grayBuffer[p] = boosted;
   }
 
+  // Horizontal line suppression for form field underlines
+  for (let y = padding + 2; y < canvasHeight - padding - 2; y++) {
+    let darkCountInRow = 0;
+    for (let x = padding; x < canvasWidth - padding; x++) {
+      if (grayBuffer[y * canvasWidth + x] < 140) {
+        darkCountInRow++;
+      }
+    }
+    if (darkCountInRow > (canvasWidth - padding * 2) * 0.35) {
+      for (let x = padding; x < canvasWidth - padding; x++) {
+        const idx = y * canvasWidth + x;
+        const above = (y - 3) * canvasWidth + x;
+        const below = (y + 3) * canvasWidth + x;
+        if (grayBuffer[above] > 180 && grayBuffer[below] > 180) {
+          const dataIdx = idx * 4;
+          data[dataIdx] = 255;
+          data[dataIdx + 1] = 255;
+          data[dataIdx + 2] = 255;
+        }
+      }
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
+
+function calculatePreprocessingDimensions(
+  naturalWidth: number,
+  naturalHeight: number
+): { width: number; height: number } {
+  const maxDim = 2000;
+  let width = naturalWidth || 1000;
+  let height = naturalHeight || 1000;
+
+  if (width > maxDim || height > maxDim) {
+    const scale = maxDim / Math.max(width, height);
+    width = Math.round(width * scale);
+    height = Math.round(height * scale);
+  }
+
+  const minDim = 300;
+  if (height < minDim || width < 600) {
+    const upScale = Math.min(
+      3.5,
+      Math.max(1.5, 600 / Math.max(width, 100), minDim / Math.max(height, 50))
+    );
+    width = Math.round(width * upScale);
+    height = Math.round(height * upScale);
+  }
+
+  return { width, height };
+}
+
+async function preprocessImageInMemory(
+  file: File,
+  registerCanvas: (canvas: HTMLCanvasElement) => void,
+  resourceHandle: EphemeralResourceHandle
+): Promise<HTMLCanvasElement | File | string> {
+  if (typeof document === 'undefined') {
+    return file;
+  }
+
+  // 1. Preferred modern path: decode directly via createImageBitmap without creating any blob: URL
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file);
+      const { width, height } = calculatePreprocessingDimensions(bitmap.width, bitmap.height);
+      const padding = 20;
+      const canvas = document.createElement('canvas');
+      registerCanvas(canvas);
+      canvas.width = width + padding * 2;
+      canvas.height = height + padding * 2;
+
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(bitmap, padding, padding, width, height);
+        bitmap.close();
+
+        applyImageEnhancements(ctx, canvas, padding);
+        return canvas;
+      }
+      bitmap.close();
+    } catch {
+      // Fall through to Image element path
+    }
+  }
+
+  // 2. Fallback path for environments without createImageBitmap:
+  // Create ephemeral object URL and revoke it immediately once drawn
   return new Promise((resolve) => {
+    let objectUrl = '';
+    try {
+      objectUrl = URL.createObjectURL(file);
+      resourceHandle.objectUrl = objectUrl;
+    } catch {
+      resolve(file);
+      return;
+    }
+
     const img = new Image();
+    const cleanupUrl = () => {
+      if (objectUrl) {
+        try {
+          URL.revokeObjectURL(objectUrl);
+        } catch {}
+        if (resourceHandle.objectUrl === objectUrl) {
+          resourceHandle.objectUrl = undefined;
+        }
+      }
+    };
+
     img.onload = () => {
       try {
-        const maxDim = 2000;
-        let width = img.naturalWidth || img.width || 1000;
-        let height = img.naturalHeight || img.height || 1000;
-
-        // Downscale oversized images
-        if (width > maxDim || height > maxDim) {
-          const scale = maxDim / Math.max(width, height);
-          width = Math.round(width * scale);
-          height = Math.round(height * scale);
-        }
-
-        // Upscale small crops / low-resolution images so character strokes are clear for OCR
-        const minDim = 300;
-        if (height < minDim || width < 600) {
-          const upScale = Math.min(
-            3.5,
-            Math.max(1.5, 600 / Math.max(width, 100), minDim / Math.max(height, 50))
-          );
-          width = Math.round(width * upScale);
-          height = Math.round(height * upScale);
-        }
-
-        // Add 20px padding margin around the image to prevent edge-touching characters from clipping
+        const { width, height } = calculatePreprocessingDimensions(
+          img.naturalWidth || img.width,
+          img.naturalHeight || img.height
+        );
         const padding = 20;
         const canvas = document.createElement('canvas');
         registerCanvas(canvas);
@@ -351,7 +459,8 @@ async function preprocessImageInMemory(
 
         const ctx = canvas.getContext('2d');
         if (!ctx) {
-          resolve(objectUrl);
+          cleanupUrl();
+          resolve(objectUrl || file);
           return;
         }
 
@@ -361,58 +470,20 @@ async function preprocessImageInMemory(
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, padding, padding, width, height);
 
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const data = imageData.data;
-        const canvasWidth = canvas.width;
-        const canvasHeight = canvas.height;
-
-        // Grayscale + dynamic contrast boost
-        const contrast = 1.45;
-        const intercept = 128 * (1 - contrast);
-
-        const grayBuffer = new Uint8Array(canvasWidth * canvasHeight);
-        for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-          const luminance = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-          const boosted = Math.max(0, Math.min(255, luminance * contrast + intercept));
-          data[i] = boosted;
-          data[i + 1] = boosted;
-          data[i + 2] = boosted;
-          grayBuffer[p] = boosted;
-        }
-
-        // Horizontal line suppression for form field underlines:
-        // Detect long horizontal lines (1-3px thick) where neighboring vertical pixels are background
-        for (let y = padding + 2; y < canvasHeight - padding - 2; y++) {
-          let darkCountInRow = 0;
-          for (let x = padding; x < canvasWidth - padding; x++) {
-            if (grayBuffer[y * canvasWidth + x] < 140) {
-              darkCountInRow++;
-            }
-          }
-          // If a row has a continuous horizontal stroke spanning > 35% of content width
-          if (darkCountInRow > (canvasWidth - padding * 2) * 0.35) {
-            for (let x = padding; x < canvasWidth - padding; x++) {
-              const idx = y * canvasWidth + x;
-              const above = (y - 3) * canvasWidth + x;
-              const below = (y + 3) * canvasWidth + x;
-              // If surrounding vertical space is light/background, suppress the thin underline
-              if (grayBuffer[above] > 180 && grayBuffer[below] > 180) {
-                const dataIdx = idx * 4;
-                data[dataIdx] = 255;
-                data[dataIdx + 1] = 255;
-                data[dataIdx + 2] = 255;
-              }
-            }
-          }
-        }
-
-        ctx.putImageData(imageData, 0, 0);
+        cleanupUrl();
+        applyImageEnhancements(ctx, canvas, padding);
         resolve(canvas);
       } catch {
-        resolve(objectUrl);
+        cleanupUrl();
+        resolve(objectUrl || file);
       }
     };
-    img.onerror = () => resolve(objectUrl);
+
+    img.onerror = () => {
+      cleanupUrl();
+      resolve(objectUrl || file);
+    };
+
     img.src = objectUrl;
   });
 }
