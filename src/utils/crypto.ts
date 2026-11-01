@@ -1,6 +1,9 @@
 import type { TableRecord } from '../db/db';
 import { calculateAccuracyScore } from './parser';
 
+export const PBKDF2_RECOMMENDED_ITERATIONS = 600_000;
+export const PBKDF2_LEGACY_ITERATIONS = 100_000;
+
 export interface EncryptedBackupEnvelope {
   app: 'aiRead';
   version: 1;
@@ -10,7 +13,8 @@ export interface EncryptedBackupEnvelope {
   salt: string; // Base64 16 bytes
   iv: string; // Base64 12 bytes
   ciphertext: string; // Base64 AES-GCM ciphertext + 16-byte tag
-  checksum: string; // SHA-256 hex digest of the unencrypted JSON payload
+  checksum: string; // SHA-256 hex digest of the ciphertext (or plaintext in legacy backups)
+  iterations?: number; // PBKDF2 iterations (default 600,000 for new backups; fallback 100,000 for legacy v1)
 }
 
 export interface DecryptedBackupResult {
@@ -52,7 +56,11 @@ export async function computeSha256Hex(text: string): Promise<string> {
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function deriveAesGcmKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
+async function deriveAesGcmKey(
+  password: string,
+  salt: Uint8Array,
+  iterations = PBKDF2_RECOMMENDED_ITERATIONS
+): Promise<CryptoKey> {
   const enc = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
@@ -66,7 +74,7 @@ async function deriveAesGcmKey(password: string, salt: Uint8Array): Promise<Cryp
     {
       name: 'PBKDF2',
       salt,
-      iterations: 100_000,
+      iterations,
       hash: 'SHA-256',
     },
     keyMaterial,
@@ -122,17 +130,17 @@ export async function encryptRecords(
   records: TableRecord[],
   password: string
 ): Promise<EncryptedBackupEnvelope> {
-  if (!password || password.length < 4) {
-    throw new Error('Password must be at least 4 characters long');
+  if (!password || password.length < 8) {
+    throw new Error('Password must be at least 8 characters long');
   }
 
   const cleanRecords = records.map(sanitizeRecordForBackup);
   const jsonPayload = JSON.stringify(cleanRecords);
-  const checksum = await computeSha256Hex(jsonPayload);
 
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveAesGcmKey(password, salt);
+  const iterations = PBKDF2_RECOMMENDED_ITERATIONS;
+  const key = await deriveAesGcmKey(password, salt, iterations);
 
   const enc = new TextEncoder();
   const cipherBuffer = await crypto.subtle.encrypt(
@@ -144,6 +152,10 @@ export async function encryptRecords(
     enc.encode(jsonPayload)
   );
 
+  const ciphertext = uint8ArrayToBase64(new Uint8Array(cipherBuffer));
+  // Checksum is computed over ciphertext to prevent plaintext hash oracle leakage
+  const checksum = await computeSha256Hex(ciphertext);
+
   return {
     app: 'aiRead',
     version: 1,
@@ -152,8 +164,9 @@ export async function encryptRecords(
     recordCount: cleanRecords.length,
     salt: uint8ArrayToBase64(salt),
     iv: uint8ArrayToBase64(iv),
-    ciphertext: uint8ArrayToBase64(new Uint8Array(cipherBuffer)),
+    ciphertext,
     checksum,
+    iterations,
   };
 }
 
@@ -181,7 +194,12 @@ export async function decryptRecords(
     throw new Error('Corrupted backup: invalid base64 encoding');
   }
 
-  const key = await deriveAesGcmKey(password, salt);
+  // Pre-validate checksum against ciphertext (standard format)
+  const ciphertextChecksum = await computeSha256Hex(envelope.ciphertext);
+  const isCiphertextChecksumMatch = ciphertextChecksum === envelope.checksum;
+
+  const iterations = envelope.iterations ?? PBKDF2_LEGACY_ITERATIONS;
+  const key = await deriveAesGcmKey(password, salt, iterations);
 
   let decryptedBuffer: ArrayBuffer;
   try {
@@ -199,10 +217,12 @@ export async function decryptRecords(
 
   const jsonString = new TextDecoder().decode(decryptedBuffer);
 
-  // Verify SHA-256 integrity hash
-  const computedHash = await computeSha256Hex(jsonString);
-  if (computedHash !== envelope.checksum) {
-    throw new Error('Integrity check failed: payload checksum mismatch');
+  // If checksum did not match ciphertext, fallback check for legacy backups that hashed plaintext
+  if (!isCiphertextChecksumMatch) {
+    const legacyPlaintextChecksum = await computeSha256Hex(jsonString);
+    if (legacyPlaintextChecksum !== envelope.checksum) {
+      throw new Error('Integrity check failed: payload checksum mismatch');
+    }
   }
 
   let parsed: unknown;

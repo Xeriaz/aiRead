@@ -50,9 +50,9 @@ describe('BackupModal Encrypted Export & Import', () => {
     const passwordInputs = screen.getAllByPlaceholderText('••••••••');
     expect(passwordInputs).toHaveLength(2);
 
-    // Type short password < 4 chars
-    await user.type(passwordInputs[0], '123');
-    await user.type(passwordInputs[1], '123');
+    // Type short password < 8 chars
+    await user.type(passwordInputs[0], '1234567');
+    await user.type(passwordInputs[1], '1234567');
     await user.click(screen.getByRole('button', { name: /Atsisiųsti užšifruotą failą/i }));
     expect(await screen.findByText(t.labels.backupPasswordMinLength)).toBeInTheDocument();
 

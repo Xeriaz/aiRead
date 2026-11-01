@@ -100,7 +100,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({
     setExportError(null);
     setExportSuccess(false);
 
-    if (exportPassword.length < 4) {
+    if (exportPassword.length < 8) {
       setExportError(t.labels.backupPasswordMinLength);
       return;
     }

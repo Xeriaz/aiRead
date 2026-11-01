@@ -11,9 +11,6 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes('node_modules/xlsx')) {
-            return 'xlsx-vendor';
-          }
           if (id.includes('node_modules/tesseract.js')) {
             return 'tesseract-vendor';
           }

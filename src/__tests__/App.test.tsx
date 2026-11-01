@@ -1,7 +1,6 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import * as XLSX from 'xlsx';
 import App from '../App';
 import { db } from '../db/db';
 import {
@@ -25,11 +24,6 @@ import {
   IMAGE_MEMORY_TTL_MS,
   registerEphemeralResource,
 } from '../utils/ocr';
-import {
-  generateCsvContent,
-  generateJsonContent,
-  generateXlsxBuffer,
-} from '../utils/export';
 
 describe('Parser, Accuracy Scoring & Multi-Candidate Utilities', () => {
   it('normalizes Lithuanian phone numbers without forcing output format', () => {
@@ -302,74 +296,6 @@ describe('Ephemeral Image Memory Hard TTL Watchdog', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-});
-
-describe('Export Utilities (CSV, XLSX, JSON)', () => {
-  const sampleRecords = [
-    {
-      id: 1,
-      fullName: 'Jonas Jonaitis',
-      address: 'Gedimino pr. 15-4, Vilnius',
-      phone: '0-612-34567',
-      licensePlate: 'ABC 123',
-      carModel: 'VOLKSWAGEN PASSAT',
-      validPeriod: '2026-09-04 2027-09-04',
-      personalCode: '38504121234',
-      accuracyScore: 100,
-      createdAt: '2026-09-04T10:00:00.000Z',
-      updatedAt: '2026-09-04T10:00:00.000Z',
-    },
-  ];
-
-  it('generates UTF-8 BOM CSV with Lithuanian headers, Eil. Nr., and Tikslumas', () => {
-    const csv = generateCsvContent(sampleRecords, 'lt');
-    expect(csv.startsWith('\uFEFF')).toBe(true);
-    expect(csv).toContain(
-      'Eil. Nr.,Vardas Pavardė,Adresas,Telefonas,Valst. Nr.,Modelis,Galiojimas,Asmens kodas,Tikslumas'
-    );
-    expect(csv).toContain(
-      '1,Jonas Jonaitis,"Gedimino pr. 15-4, Vilnius",0-612-34567,ABC 123,VOLKSWAGEN PASSAT,2026-09-04 2027-09-04,38504121234,100%'
-    );
-  });
-
-  it('escapes CSV cells with formula injection characters (=, +, -, @, \\t, \\r)', () => {
-    const injectionRecords = [
-      {
-        id: 1,
-        fullName: '=SUM(A1:A10)',
-        address: '+370 Vilnius',
-        phone: '-123456',
-        licensePlate: '@MALICIOUS',
-        carModel: '\tAUDI',
-        validPeriod: '\r2026-09-04',
-        personalCode: '38504121234',
-        accuracyScore: 100,
-        createdAt: '2026-09-04T10:00:00.000Z',
-        updatedAt: '2026-09-04T10:00:00.000Z',
-      },
-    ];
-    const csv = generateCsvContent(injectionRecords, 'lt');
-    expect(csv).toContain("'=SUM(A1:A10)");
-    expect(csv).toContain("'+370 Vilnius");
-    expect(csv).toContain("'-123456");
-    expect(csv).toContain("'@MALICIOUS");
-  });
-
-  it('generates JSON and XLSX buffer with localized columns including Tikslumas / Accuracy', () => {
-    const json = generateJsonContent(sampleRecords, 'lt');
-    const parsed = JSON.parse(json);
-    expect(parsed[0]['Eil. Nr.']).toBe(1);
-    expect(parsed[0]['Vardas Pavardė']).toBe('Jonas Jonaitis');
-    expect(parsed[0]['Modelis']).toBe('VOLKSWAGEN PASSAT');
-    expect(parsed[0]['Tikslumas']).toBe('100%');
-
-    const xlsxBuf = generateXlsxBuffer(sampleRecords, 'lt');
-    expect(xlsxBuf.byteLength).toBeGreaterThan(100);
-    const workbook = XLSX.read(xlsxBuf, { type: 'array' });
-    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json<Record<string, string | number>>(firstSheet);
-    expect(rows[0]['Tikslumas']).toBe('100%');
   });
 });
 

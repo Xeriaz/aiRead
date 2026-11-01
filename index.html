@@ -6,6 +6,12 @@
     <title>aiRead</title>
     <meta name="description" content="Duomenų nuskaitymas ir lentelė / Document Reader & CRUD Table" />
 
+    <!-- Strict Content Security Policy (CSP) -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; connect-src 'self' https://cdn.jsdelivr.net https://tessdata.projectnaptha.com;"
+    />
+
     <!-- Dual light/dark theme-color meta tags -->
     <meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
@@ -22,22 +28,6 @@
     <link rel="icon" type="image/png" sizes="16x16" href="./favicon-16x16.png" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon-180x180.png" />
-
-    <script>
-      (function () {
-        try {
-          var saved = localStorage.getItem('aiRead_theme');
-          var theme = saved === 'dark' ? 'dark' : 'light';
-          var root = document.documentElement;
-          root.classList.remove('light', 'dark');
-          root.classList.add(theme);
-          var meta = document.getElementById('theme-color-meta');
-          if (meta) {
-            meta.setAttribute('content', theme === 'dark' ? '#09090b' : '#f8fafc');
-          }
-        } catch (e) {}
-      })();
-    </script>
   </head>
   <body class="antialiased selection:bg-indigo-500/20">
     <div id="root"></div>
