@@ -245,12 +245,11 @@ export default function App() {
 
   const handleAddOneYear = (target: 'modal' | 'import' | 'staging', currentPeriod: string) => {
     const [start] = splitValidPeriod(currentPeriod);
-    const baseStart =
-      start && /^\d{4}-\d{2}-\d{2}$/.test(start)
-        ? start
-        : new Date().toISOString().slice(0, 10);
-    const nextYear = addOneYearToDate(baseStart);
-    const updated = `${baseStart} ${nextYear}`;
+    if (!start || !/^\d{4}-\d{2}-\d{2}$/.test(start)) {
+      return;
+    }
+    const nextYear = addOneYearToDate(start);
+    const updated = `${start} ${nextYear}`;
     if (target === 'modal') {
       setFormFields((prev) => ({ ...prev, validPeriod: updated }));
     }

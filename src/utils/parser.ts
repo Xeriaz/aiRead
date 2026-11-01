@@ -359,10 +359,55 @@ export function addOneYearToDate(isoDate: string): string {
 }
 
 /**
+ * Extracts 2-digit year table dates (e.g. Lithuanian Green Card / OCTA tables:
+ * "GALIOJA / VALID", "Nuo / From", "Iki / To", "Metų / Year", "Mėn. / Month", "Dienos / Day",
+ * "26 11 15 00:00 27 11 14 24:00" -> ["2026-11-15", "2027-11-14"]).
+ */
+export function extractTwoDigitTableDates(windowText: string): string[] {
+  const dates: string[] = [];
+
+  // Pattern A: Labeled with Metų/Year ... Mėn/Month ... Dienos/Day
+  const labeledRegex =
+    /(?:met[uų]|year)[\s:.-]*(\d{2,4})[^\d]+(?:m[eė]n|month)[\s:.-]*(\d{1,2})[^\d]+(?:dien|day)[\s:.-]*(\d{1,2})/gi;
+  for (const m of windowText.matchAll(labeledRegex)) {
+    const rawY = Number(m[1]);
+    const y = rawY < 100 ? 2000 + rawY : rawY;
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    if (isValidCalendarDate(y, mo, d)) {
+      const iso = y + "-" + String(mo).padStart(2, "0") + "-" + String(d).padStart(2, "0");
+      if (!dates.includes(iso)) {
+        dates.push(iso);
+      }
+    }
+  }
+
+  if (dates.length >= 2) {
+    return dates;
+  }
+
+  // Pattern B: Raw 2-digit year triples in table rows: e.g. "26 11 15 00:00 27 11 14 24:00" or "26 11 15"
+  const tripleRegex = /\b(2[0-9])\s+(0?[1-9]|1[0-2])\s+(0?[1-9]|[12]\d|3[01])\b/g;
+  for (const m of windowText.matchAll(tripleRegex)) {
+    const y = 2000 + Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    if (isValidCalendarDate(y, mo, d)) {
+      const iso = y + "-" + String(mo).padStart(2, "0") + "-" + String(d).padStart(2, "0");
+      if (!dates.includes(iso)) {
+        dates.push(iso);
+      }
+    }
+  }
+
+  return dates;
+}
+
+/**
  * Normalizes a date range string into "YYYY-MM-DD YYYY-MM-DD" (e.g., "2026-09-04 2027-09-04").
  */
 export function formatValidPeriod(raw: string, autoAddOneYearIfSingle = false): string {
-  if (!raw || !raw.trim()) return '';
+  if (!raw || !raw.trim()) return "";
   const dateTokenRegex = /\b(?:\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\b/g;
   const matches = raw.match(dateTokenRegex) || [];
   const normalized = matches
@@ -371,13 +416,21 @@ export function formatValidPeriod(raw: string, autoAddOneYearIfSingle = false): 
 
   if (normalized.length >= 2) {
     const [first, second] = normalized;
-    return first <= second ? `${first} ${second}` : `${second} ${first}`;
+    return first <= second ? (first + " " + second) : (second + " " + first);
+  }
+
+  if (normalized.length === 0) {
+    const tableDates = extractTwoDigitTableDates(raw);
+    if (tableDates.length >= 2) {
+      const [first, second] = tableDates;
+      return first <= second ? (first + " " + second) : (second + " " + first);
+    }
   }
 
   if (normalized.length === 1) {
     const start = normalized[0];
     if (autoAddOneYearIfSingle) {
-      return `${start} ${addOneYearToDate(start)}`;
+      return start + " " + addOneYearToDate(start);
     }
     return start;
   }
@@ -496,13 +549,16 @@ export function extractValidPeriodCandidates(text: string): string[] {
   const candidates: string[] = [];
   const lines = text.split(/\r?\n/);
 
-  // 1. Prioritize lines with validity keywords
-  const validityKeywords = /(?:galioj|laikotarp|nuo\b|iki\b|valid|period|term)/i;
+  // 1. Prioritize lines with validity or table keywords
+  const validityKeywords =
+    /(?:galioj|laikotarp|nuo\b|iki\b|valid|period|term|pradž|pradz|pabaig|from\b|to\b|met[uų]|year|m[eė]n|month|dien|day)/i;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (validityKeywords.test(line)) {
-      const combinedWindow = [line, lines[i + 1] || ''].join(' ');
+      const combinedWindow = lines
+        .slice(Math.max(0, i - 1), Math.min(lines.length, i + 5))
+        .join(" ");
       const dateTokens =
         combinedWindow.match(/\b(?:\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\b/g) || [];
       const windowDates: string[] = [];
@@ -512,17 +568,28 @@ export function extractValidPeriodCandidates(text: string): string[] {
           windowDates.push(iso);
         }
       }
+
+      // Check 2-digit table dates (e.g. Green Card / OCTA tables: 26 11 15 27 11 14)
+      if (windowDates.length < 2) {
+        const tableDates = extractTwoDigitTableDates(combinedWindow);
+        for (const td of tableDates) {
+          if (!windowDates.includes(td)) {
+            windowDates.push(td);
+          }
+        }
+      }
+
       if (windowDates.length >= 2) {
         const [d1, d2] = windowDates;
-        addUniqueCandidate(candidates, d1 <= d2 ? `${d1} ${d2}` : `${d2} ${d1}`);
+        addUniqueCandidate(candidates, d1 <= d2 ? (d1 + " " + d2) : (d2 + " " + d1));
       } else if (windowDates.length === 1) {
-        const d1 = windowDates[0];
-        addUniqueCandidate(candidates, `${d1} ${addOneYearToDate(d1)}`);
+        // Single date explicitly accompanied by a validity keyword
+        addUniqueCandidate(candidates, windowDates[0]);
       }
     }
   }
 
-  // 2. Scan all dates in text (non-overlapping adjacent pairs)
+  // 2. Scan all dates in text (non-overlapping adjacent pairs only if 2+ dates exist)
   const allTokens =
     text.match(/\b(?:\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\b/g) || [];
   const allIso: string[] = [];
@@ -537,11 +604,8 @@ export function extractValidPeriodCandidates(text: string): string[] {
     for (let i = 0; i + 1 < allIso.length; i += 2) {
       const d1 = allIso[i];
       const d2 = allIso[i + 1];
-      addUniqueCandidate(candidates, d1 <= d2 ? `${d1} ${d2}` : `${d2} ${d1}`);
+      addUniqueCandidate(candidates, d1 <= d2 ? (d1 + " " + d2) : (d2 + " " + d1));
     }
-  } else if (allIso.length === 1) {
-    const start = allIso[0];
-    addUniqueCandidate(candidates, `${start} ${addOneYearToDate(start)}`);
   }
 
   return candidates;

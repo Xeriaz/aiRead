@@ -726,4 +726,92 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
     await user.click(dialog);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
+  it('extracts validity period accurately from all 6 insurance policy layouts', () => {
+    // 1. Table format with 2-digit years
+    const sample1 = `
+      GALIOJA / VALID
+      Nuo / From Iki / To
+      Metų / Year Mėn. / Month Dienos / Day Val., min. / Time Metų / Year Mėn. / Month Dienos / Day Val., min. / Time
+      26 11 15 00:00 27 11 14 24:00
+    `;
+    expect(parseDocumentText(sample1).validPeriod).toBe('2026-11-15 2027-11-14');
+
+    // 2. Dots in dates with time
+    const sample2 = `
+      Draudimo grupė: Bendrosios civilinės atsakomybės draudimas
+      Draudimo laikotarpis
+      Nuo: 2026.11.14 00:00    Iki: 2027.11.13 23:59
+      Draudėjas
+    `;
+    expect(parseDocumentText(sample2).validPeriod).toBe('2026-11-14 2027-11-13');
+
+    // 3. Multi-line label with en-dash
+    const sample3 = `
+      tel. +370 5 210 8888
+      Draudimo 2026-10-28 11:02 – 2027-10-27 23:59
+      liudijimo galiojimo
+      periodas
+    `;
+    expect(parseDocumentText(sample3).validPeriod).toBe('2026-10-28 2027-10-27');
+
+    // 4. Terminas with nuo ... iki and trailing period
+    const sample4 = `
+      Draudimo sutarties terminas: nuo 2026-10-29 14:30 iki 2027-10-29 00:00.
+    `;
+    expect(parseDocumentText(sample4).validPeriod).toBe('2026-10-29 2027-10-29');
+
+    // 5. Laikotarpis with val. suffix
+    const sample5 = `
+      Draudimo laikotarpis:
+      Nuo 2026-10-23 14:45 val.    Iki 2027-10-22 23:59 val.
+    `;
+    expect(parseDocumentText(sample5).validPeriod).toBe('2026-10-23 2027-10-22');
+
+    // 6. Pradžia: and Pabaiga: lines
+    const sample6 = `
+      Numatomas draudimo laikotarpis:  Pradžia: 2026-11-05 00:00 val.
+                                       Pabaiga: 2027-11-05 00:00 val.
+    `;
+    expect(parseDocumentText(sample6).validPeriod).toBe('2026-11-05 2027-11-05');
+  });
+
+  it('leaves validPeriod empty by default when document is unscannable or has no date', () => {
+    // Empty / unscannable text
+    expect(parseDocumentText('').validPeriod).toBe('');
+    expect(parseDocumentCandidates('').validPeriod).toEqual([]);
+
+    // Document with text but no dates
+    const noDatesSample = `
+      Vardas, pavardė: Jonas Jonaitis
+      Adresas: Vilniaus g. 10
+      Valst. nr.: ABC 123
+      Markė: TOYOTA
+    `;
+    expect(parseDocumentText(noDatesSample).validPeriod).toBe('');
+    expect(parseDocumentCandidates(noDatesSample).validPeriod).toEqual([]);
+
+    // Document with an unrelated single birth date: must not auto-generate a validPeriod!
+    const birthDateOnly = `
+      Vardas: Petras
+      Pavardė: Petraitis
+      Gimimo data: 1985-04-12
+    `;
+    expect(parseDocumentText(birthDateOnly).validPeriod).toBe('');
+    expect(parseDocumentCandidates(birthDateOnly).validPeriod).toEqual([]);
+  });
+
+  it('allows PDF files in both SingleImportTab and BulkStagingTab file inputs', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    // Single Import Tab
+    await user.click(screen.getByRole('button', { name: /Importas/i }));
+    const singleInput = screen.getByTestId('single-image-file-input');
+    expect(singleInput.getAttribute('accept')).toContain('application/pdf');
+
+    // Bulk Staging Tab
+    await user.click(screen.getByRole('button', { name: /Masinis/i }));
+    const bulkInput = screen.getByTestId('bulk-file-input');
+    expect(bulkInput.getAttribute('accept')).toContain('application/pdf');
+  });
 });

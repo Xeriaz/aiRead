@@ -162,7 +162,7 @@ export const SingleImportTab: React.FC<SingleImportTabProps> = ({
           )}
           <input
             type="file"
-            accept="image/*"
+            accept="image/*,application/pdf,.pdf"
             data-testid="single-image-file-input"
             onChange={handlePhotoUpload}
             className="hidden"

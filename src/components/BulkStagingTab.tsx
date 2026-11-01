@@ -270,7 +270,7 @@ export const BulkStagingTab: React.FC<BulkStagingTabProps> = ({
           </span>
           <input
             type="file"
-            accept="image/*"
+            accept="image/*,application/pdf,.pdf"
             multiple
             data-testid="bulk-file-input"
             onChange={handleBulkPhotoUpload}

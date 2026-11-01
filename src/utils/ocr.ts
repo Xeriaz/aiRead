@@ -228,6 +228,13 @@ export async function extractTextAndConfidenceFromImageFile(
   file: File,
   onProgress?: OcrProgressCallback
 ): Promise<OcrExtractionResult> {
+  const isPdf =
+    file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  if (isPdf) {
+    const { extractTextAndConfidenceFromPdfFile } = await import('./pdf');
+    return extractTextAndConfidenceFromPdfFile(file, onProgress);
+  }
+
   const objectUrl = URL.createObjectURL(file);
   const resourceHandle: EphemeralResourceHandle = {
     objectUrl,
@@ -293,6 +300,13 @@ export async function extractTextFromImageFile(
   const result = await extractTextAndConfidenceFromImageFile(file, onProgress);
   return result.text;
 }
+
+/**
+ * Unified file text and confidence extractor.
+ * Automatically delegates to PDF extractor if file is a PDF,
+ * or runs image preprocessing and Tesseract OCR if file is an image.
+ */
+export const extractTextAndConfidenceFromFile = extractTextAndConfidenceFromImageFile;
 
 async function preprocessImageInMemory(
   objectUrl: string,

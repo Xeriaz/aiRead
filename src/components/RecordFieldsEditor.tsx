@@ -152,10 +152,7 @@ export const RecordFieldsEditor: React.FC<RecordFieldsEditorProps> = ({
 
   const updateDatePart = (part: 'start' | 'end', newIso: string) => {
     const nextStart = part === 'start' ? newIso : startDate;
-    const nextEnd =
-      part === 'end'
-        ? newIso
-        : endDate || (newIso ? addOneYearToDate(newIso) : '');
+    const nextEnd = part === 'end' ? newIso : endDate;
     const combined = [nextStart, nextEnd].filter(Boolean).join(' ');
     onChange((prev) => ({ ...prev, validPeriod: combined }));
   };
@@ -165,12 +162,11 @@ export const RecordFieldsEditor: React.FC<RecordFieldsEditorProps> = ({
       onAddOneYear(target, values.validPeriod);
     } else {
       const [start] = splitValidPeriod(values.validPeriod);
-      const baseStart =
-        start && /^\d{4}-\d{2}-\d{2}$/.test(start)
-          ? start
-          : new Date().toISOString().slice(0, 10);
-      const nextYear = addOneYearToDate(baseStart);
-      const updated = `${baseStart} ${nextYear}`;
+      if (!start || !/^\d{4}-\d{2}-\d{2}$/.test(start)) {
+        return;
+      }
+      const nextYear = addOneYearToDate(start);
+      const updated = `${start} ${nextYear}`;
       onChange((prev) => ({ ...prev, validPeriod: updated }));
     }
   };
