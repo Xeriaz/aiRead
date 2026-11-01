@@ -59,6 +59,8 @@ export interface Translations {
     exportJson: string;
     viewCards: string;
     viewTable: string;
+    exportProtected: string;
+    importBackup: string;
   };
   labels: {
     recordsCount: string;
@@ -98,6 +100,32 @@ export interface Translations {
     statusActive: string;
     statusExpiring: string;
     statusExpired: string;
+    backupModalTitle: string;
+    backupExportTab: string;
+    backupImportTab: string;
+    backupExportDesc: string;
+    backupImportDesc: string;
+    backupPassword: string;
+    backupPasswordConfirm: string;
+    backupPasswordMismatch: string;
+    backupPasswordMinLength: string;
+    backupExportAction: string;
+    backupImportAction: string;
+    backupSelectFile: string;
+    backupDropNotice: string;
+    backupDecryptAction: string;
+    backupWrongPassword: string;
+    backupInvalidFile: string;
+    backupMergeAction: string;
+    backupReplaceAction: string;
+    backupSuccessImport: string;
+    backupEncryptionNotice: string;
+    backupPhoneToPcNotice: string;
+    statsTotalRecords: string;
+    statsActive: string;
+    statsExpiring: string;
+    statsExpired: string;
+    statsAvgAccuracy: string;
   };
 }
 
@@ -161,6 +189,8 @@ export const translations: Record<Language, Translations> = {
       exportJson: 'JSON',
       viewCards: 'Kortelės',
       viewTable: 'Lentelė',
+      exportProtected: 'Apsaugotas eksportas',
+      importBackup: 'Importuoti atsarginę kopiją',
     },
     labels: {
       recordsCount: 'Įrašai',
@@ -204,6 +234,35 @@ export const translations: Record<Language, Translations> = {
       statusActive: 'Galioja',
       statusExpiring: 'Baigiasi',
       statusExpired: 'Pasibaigęs',
+      backupModalTitle: 'Duomenų sinchronizavimas ir atsarginė kopija',
+      backupExportTab: 'Apsaugotas eksportas (iš telefono)',
+      backupImportTab: 'Importuoti duomenis (į kompiuterį / naršyklę)',
+      backupExportDesc:
+        'Eksportuokite duomenis užšifruotus stipriu AES-256-GCM šifru su PBKDF2 raktu ir SHA-256 vientisumo parašu. Failą saugu siųsti per el. paštą, AirDrop ar debesį.',
+      backupImportDesc:
+        'Pasirinkite iš telefono eksportuotą apsaugotą failą (.airead arba .json) ir įveskite slaptažodį duomenų iššifravimui.',
+      backupPassword: 'Šifravimo slaptažodis',
+      backupPasswordConfirm: 'Pakartokite slaptažodį',
+      backupPasswordMismatch: 'Slaptažodžiai nesutampa',
+      backupPasswordMinLength: 'Slaptažodis turi būti bent 4 simbolių',
+      backupExportAction: 'Atsisiųsti užšifruotą failą (.airead)',
+      backupImportAction: 'Importuoti įrašus',
+      backupSelectFile: 'Pasirinkite failą (.airead / .json)',
+      backupDropNotice: 'Nutempkite failą čia arba spustelėkite pasirinkimui',
+      backupDecryptAction: 'Iššifruoti ir patikrinti',
+      backupWrongPassword: 'Neteisingas slaptažodis arba sugadintas failas',
+      backupInvalidFile: 'Netinkamas failo formatas',
+      backupMergeAction: 'Sujungti su esamais įrašais',
+      backupReplaceAction: 'Pakeisti visus įrašus (perrašyti)',
+      backupSuccessImport: 'Sėkmingai importuota įrašų: {count}',
+      backupEncryptionNotice: 'AES-256-GCM + PBKDF2 + SHA-256 autentiškas šifravimas',
+      backupPhoneToPcNotice:
+        'Kaip perkelti: telefone nustatykite slaptažodį ir eksportuokite -> atsiųskite failą į kompiuterį -> kompiuterio naršyklėje atidarykite aiRead ir importuokite!',
+      statsTotalRecords: 'Iš viso įrašų',
+      statsActive: 'Galiojantys',
+      statsExpiring: 'Besibaigiantys',
+      statsExpired: 'Pasibaigę',
+      statsAvgAccuracy: 'Vidutinis tikslumas',
     },
   },
   en: {
@@ -265,6 +324,8 @@ export const translations: Record<Language, Translations> = {
       exportJson: 'JSON',
       viewCards: 'Cards',
       viewTable: 'Table',
+      exportProtected: 'Protected Export',
+      importBackup: 'Import Backup',
     },
     labels: {
       recordsCount: 'Records',
@@ -306,6 +367,35 @@ export const translations: Record<Language, Translations> = {
       statusActive: 'Valid',
       statusExpiring: 'Expiring soon',
       statusExpired: 'Expired',
+      backupModalTitle: 'Data Sync & Backup Protection',
+      backupExportTab: 'Protected Export (from Phone)',
+      backupImportTab: 'Import Data (on PC / Browser)',
+      backupExportDesc:
+        'Export records protected with authenticated AES-256-GCM encryption, PBKDF2 key derivation, and SHA-256 tamper-proof checksum. Completely safe to send via email, AirDrop, or cloud drive.',
+      backupImportDesc:
+        'Select the protected backup file (.airead or .json) exported from your phone, and enter your password to safely restore your records.',
+      backupPassword: 'Encryption Password',
+      backupPasswordConfirm: 'Confirm Password',
+      backupPasswordMismatch: 'Passwords do not match',
+      backupPasswordMinLength: 'Password must be at least 4 characters long',
+      backupExportAction: 'Download Encrypted File (.airead)',
+      backupImportAction: 'Import Records',
+      backupSelectFile: 'Select File (.airead / .json)',
+      backupDropNotice: 'Drop backup file here, or click to browse',
+      backupDecryptAction: 'Decrypt & Verify File',
+      backupWrongPassword: 'Incorrect password or corrupted file',
+      backupInvalidFile: 'Invalid file format',
+      backupMergeAction: 'Merge with Existing Records',
+      backupReplaceAction: 'Replace All Existing Records',
+      backupSuccessImport: 'Successfully imported {count} records',
+      backupEncryptionNotice: 'AES-256-GCM + PBKDF2 + SHA-256 Authenticated Encryption',
+      backupPhoneToPcNotice:
+        'Phone-to-PC Workflow: Scan on phone -> Protected Export with password -> Send to PC -> Open aiRead on PC browser & Import!',
+      statsTotalRecords: 'Total Records',
+      statsActive: 'Active',
+      statsExpiring: 'Expiring Soon',
+      statsExpired: 'Expired',
+      statsAvgAccuracy: 'Avg. Accuracy',
     },
   },
 };
