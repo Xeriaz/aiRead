@@ -4,7 +4,6 @@ import {
   Car,
   CheckCircle2,
   Clock,
-  Download,
   Edit3,
   FileCheck,
   LayoutGrid,
@@ -22,7 +21,6 @@ import {
 } from 'lucide-react';
 import type { TableRecord } from '../db/db';
 import type { Language, Translations } from '../i18n/translations';
-import { exportToCsv, exportToJson, exportToXlsx } from '../utils/export';
 import { calculateAccuracyScore } from '../utils/parser';
 import { getAccuracyBadgeClasses, getValidityStatus } from './RecordFieldsEditor';
 
@@ -53,7 +51,6 @@ export const RecordsTableTab: React.FC<RecordsTableTabProps> = ({
   onEditRecord,
   onDeleteRecord,
   onOpenBackupModal,
-  lang,
   t,
 }) => {
   const filteredRecords = useMemo(() => {
@@ -222,39 +219,9 @@ export const RecordsTableTab: React.FC<RecordsTableTabProps> = ({
             )}
           </div>
 
-          {/* Quick Export formats & View Mode Switcher */}
+          {/* View Mode Switcher */}
           <div className="flex items-center gap-1.5">
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => exportToCsv(filteredRecords, lang)}
-                aria-label="Export CSV"
-                className="touch-press inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 text-[11px] font-semibold text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors"
-              >
-                <Download className="w-3 h-3" />
-                <span>{t.actions.exportCsv}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => exportToXlsx(filteredRecords, lang)}
-                aria-label="Export XLSX"
-                className="touch-press inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 text-[11px] font-semibold text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors"
-              >
-                <Download className="w-3 h-3" />
-                <span>{t.actions.exportXlsx}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => exportToJson(filteredRecords, lang)}
-                aria-label="Export JSON"
-                className="touch-press inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 text-[11px] font-semibold text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors"
-              >
-                <Download className="w-3 h-3" />
-                <span>{t.actions.exportJson}</span>
-              </button>
-            </div>
-
-            <div className="inline-flex rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 p-0.5 shrink-0 ml-1">
+            <div className="inline-flex rounded-xl border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-zinc-950 p-0.5 shrink-0">
               <button
                 type="button"
                 onClick={() => onViewModeChange('table')}

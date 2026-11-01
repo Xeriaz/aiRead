@@ -840,4 +840,33 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
     expect(parseDocumentText('Tel. 061234567').phone).toBe('061234567');
   });
 
+  it("does not show unencrypted CSV/JSON/XLSX export buttons, and keeps language/theme controls only in settings", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    // 1. Table view must not contain unencrypted CSV/JSON/XLSX export buttons
+    expect(screen.queryByRole("button", { name: /Export CSV/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Export XLSX/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Export JSON/i })).not.toBeInTheDocument();
+
+    // 2. Main header must not contain language pills (LT / EN) or quick theme switch
+    expect(screen.queryByRole("button", { name: "Quick theme switch" })).not.toBeInTheDocument();
+
+    // 3. Open Settings view
+    await user.click(screen.getByRole("button", { name: /Nustatymai|Settings/i }));
+
+    // Language selection and theme toggle are available in Settings
+    expect(screen.getByText("Lietuvių")).toBeInTheDocument();
+    expect(screen.getByText("English")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Toggle theme/i })).toBeInTheDocument();
+
+    // Settings must not contain unencrypted CSV/XLSX/JSON export buttons
+    expect(screen.queryByRole("button", { name: /^CSV$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^XLSX$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^JSON$/i })).not.toBeInTheDocument();
+
+    // Protected export and import options must still be present
+    expect(screen.getAllByRole("button", { name: /Apsaugotas eksportas|Protected Export/i }).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole("button", { name: /Importuoti atsarginę kopiją|Import Backup/i })).toBeInTheDocument();
+  });
 });

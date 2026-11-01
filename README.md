@@ -1,6 +1,6 @@
 # aiRead
 
-**aiRead** is an offline-first Progressive Web App (PWA) for scanning documents from photos, extracting structured fields locally on your device, managing records in a CRUD table, and exporting data to **CSV**, **XLSX**, or **JSON**.
+**aiRead** is an offline-first Progressive Web App (PWA) for scanning documents from photos, extracting structured fields locally on your device, managing records in a CRUD table, and safely exporting/syncing data via password-protected encrypted backups.
 
 ---
 
@@ -17,9 +17,9 @@
 - **Full CRUD Data Table:** Create, view, edit, delete, and search structured records with automatic formatting and validation.
 - **Read Accuracy Scoring:** Automatically evaluates extraction and validation quality (`0–100%`) for every entry with color-coded status badges (Green, Amber, Red).
 - **Smart Local Photo Import & Multi-Candidate Selection:** Scan a photo or paste raw text to populate fields automatically. When multiple potential matches for a field are detected in a scan, the primary match fills the input and alternative matches appear as clickable chips below it.
-- **Bilingual UI:** Supports **Lithuanian (`LT`)** as the primary default language and **English (`EN`)** as the secondary language.
+- **Bilingual UI:** Supports **Lithuanian (`LT`)** as the primary default language and **English (`EN`)** as the secondary language in Settings.
 - **Mobile & iPhone 16 Pro Ready PWA:** Safe-area aware layout (Dynamic Island & Home Indicator), light/dark theme support, and instant switching between a full Table view and a compact Mobile Card view.
-- **Multi-Format Export:** Export your data anytime to **CSV** (UTF-8 with BOM for Excel compatibility), **XLSX** (native Excel workbook), or **JSON**.
+- **Password-Protected Phone-to-PC Sync:** Export and import encrypted backups (`.airead` / `.json`) protected by authenticated **AES-256-GCM**, **PBKDF2** key derivation, and **SHA-256** tamper-proof checksums.
 
 ---
 

@@ -13,7 +13,6 @@ import {
 } from 'lucide-react';
 import { db, type StagingRecord, type TableRecord } from './db/db';
 import { translations, type Language } from './i18n/translations';
-import { exportToCsv, exportToJson, exportToXlsx } from './utils/export';
 import {
   addOneYearToDate,
   calculateAccuracyScore,
@@ -350,7 +349,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Right Header Controls: Sync/Backup, Theme & Settings */}
+          {/* Right Header Controls: Sync/Backup & Mobile Settings */}
           <div className="flex items-center gap-1.5 shrink-0">
             {/* Desktop Sync / Backup Button */}
             <button
@@ -361,47 +360,6 @@ export default function App() {
             >
               <ShieldCheck className="w-4 h-4 text-indigo-500" />
               <span className="hidden lg:inline">{t.actions.exportProtected}</span>
-            </button>
-
-            {/* Language Pill Switcher on Desktop */}
-            <div className="hidden sm:inline-flex rounded-lg border border-slate-200 dark:border-zinc-800 p-0.5 bg-slate-100 dark:bg-zinc-900 text-xs font-semibold">
-              <button
-                type="button"
-                onClick={() => setLang('lt')}
-                className={`px-2 py-1 rounded-md transition-all ${
-                  lang === 'lt'
-                    ? 'bg-white dark:bg-zinc-800 text-indigo-600 dark:text-indigo-400 shadow-2xs'
-                    : 'text-slate-500 dark:text-zinc-400'
-                }`}
-              >
-                LT
-              </button>
-              <button
-                type="button"
-                onClick={() => setLang('en')}
-                className={`px-2 py-1 rounded-md transition-all ${
-                  lang === 'en'
-                    ? 'bg-white dark:bg-zinc-800 text-indigo-600 dark:text-indigo-400 shadow-2xs'
-                    : 'text-slate-500 dark:text-zinc-400'
-                }`}
-              >
-                EN
-              </button>
-            </div>
-
-            {/* Theme Toggle */}
-            <button
-              type="button"
-              onClick={toggleTheme}
-              aria-label="Quick theme switch"
-              title="Quick theme switch"
-              className="touch-press p-2 rounded-lg border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-slate-600 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors"
-            >
-              {theme === 'light' ? (
-                <Moon className="w-4 h-4" />
-              ) : (
-                <Sun className="w-4 h-4 text-amber-400" />
-              )}
             </button>
 
             {/* Mobile Settings Icon Button */}
@@ -556,40 +514,6 @@ export default function App() {
                   >
                     <Upload className="w-3.5 h-3.5" />
                     <span>{t.actions.importBackup}</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Standard Unencrypted Formats Export */}
-              <div className="pt-3 border-t border-slate-100 dark:border-zinc-800 space-y-2">
-                <h3 className="text-xs font-semibold">{t.labels.exportData}</h3>
-                <p className="text-[11px] text-slate-500 dark:text-zinc-400">
-                  {t.labels.exportSubtitle}
-                </p>
-                <div className="grid grid-cols-3 gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => exportToCsv(records, lang)}
-                    className="touch-press py-2 px-3 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>CSV</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => exportToXlsx(records, lang)}
-                    className="touch-press py-2 px-3 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>XLSX</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => exportToJson(records, lang)}
-                    className="touch-press py-2 px-3 rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>JSON</span>
                   </button>
                 </div>
               </div>
