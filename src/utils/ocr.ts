@@ -124,6 +124,30 @@ function scheduleWarmWorkerIdle(): void {
  * Gets the existing warm worker or creates a new one.
  * If an idle timer is pending, cancels the timer and retains the existing alive worker.
  */
+/**
+ * Resolves local self-hosted paths for Tesseract worker, core, and language models
+ * so OCR operates 100% offline without connecting to external CDNs.
+ */
+export function getLocalTesseractOptions(): Record<string, unknown> {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  try {
+    const baseUrl = import.meta.env?.BASE_URL || "./";
+    const prefix = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+    const href = window.location?.href || "http://localhost/";
+
+    return {
+      workerPath: new URL(`${prefix}tesseract/worker.min.js`, href).href,
+      corePath: new URL(`${prefix}tesseract`, href).href.replace(/\/$/, ""),
+      langPath: new URL(`${prefix}tesseract/lang`, href).href.replace(/\/$/, ""),
+      gzip: true,
+    };
+  } catch {
+    return {};
+  }
+}
+
 export async function getOrCreateWarmWorker(): Promise<Worker> {
   if (idleTimer) {
     clearTimeout(idleTimer);
@@ -137,7 +161,9 @@ export async function getOrCreateWarmWorker(): Promise<Worker> {
 
   if (!warmWorkerPromise) {
     warmWorkerPromise = (async () => {
+      const localOptions = getLocalTesseractOptions();
       const worker = await createWorker(['lit', 'eng'], 1, {
+        ...localOptions,
         logger: (m) => {
           if (m.status === 'recognizing text' && typeof m.progress === 'number') {
             currentProgressCallback?.(Math.min(99, Math.round(15 + m.progress * 84)));

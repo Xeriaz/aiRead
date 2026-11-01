@@ -7,7 +7,7 @@
 ## 🔒 100% Local & Private (Zero External Storage)
 
 - **No External Servers or Cloud Storage:** All extracted records and settings stay strictly inside your browser's local storage (`IndexedDB` via Dexie) on your own device. Nothing is ever uploaded or synced to any external server.
-- **No External AI or Paid APIs:** Text recognition runs entirely in your browser using open-source local OCR (`tesseract.js` for Lithuanian and English) combined with deterministic RegExp and heuristic parsers.
+- **100% Offline & Self-Hosted OCR:** Text recognition runs entirely in your browser using local OCR (`tesseract.js` for Lithuanian and English). The WebAssembly core and trained language models are self-hosted and precached by the PWA Service Worker—no internet connection or external CDN required.
 - **Photos Are Never Saved Anywhere:** Uploaded or captured images are processed strictly in temporary RAM (`blob:` URL + offscreen `<canvas>`) only for the few seconds needed to read the text. They are **never** saved to `IndexedDB`, `localStorage`, or any server, and a hard **30-second TTL watchdog** guarantees temporary image memory is forcibly cleared.
 
 ---

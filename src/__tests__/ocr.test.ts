@@ -6,6 +6,7 @@ import {
   getOrCreateWarmWorker,
   getWarmWorker,
   OCR_TIMEOUT_MS,
+  getLocalTesseractOptions,
   terminateWarmWorker,
   WARM_WORKER_IDLE_TIMEOUT_MS,
 } from '../utils/ocr';
@@ -233,5 +234,25 @@ describe('Warm Tesseract Worker Lifecycle & Resilience', () => {
     const res2 = await extractTextAndConfidenceFromImageFile(file2);
     expect(res2.text).toBe('Recovered text');
     expect(mockWorkerInstances).toHaveLength(2);
+  });
+
+  it('configures Tesseract with local self-hosted worker, core, and lang paths for 100% offline operation', async () => {
+    const opts = getLocalTesseractOptions();
+    expect(opts.workerPath).toContain("/tesseract/worker.min.js");
+    expect(opts.corePath).toContain("/tesseract");
+    expect(opts.langPath).toContain("/tesseract/lang");
+    expect(opts.gzip).toBe(true);
+
+    await getOrCreateWarmWorker();
+    expect(createWorker).toHaveBeenCalledWith(
+      ['lit', 'eng'],
+      1,
+      expect.objectContaining({
+        workerPath: expect.stringContaining("/tesseract/worker.min.js"),
+        corePath: expect.stringContaining("/tesseract"),
+        langPath: expect.stringContaining("/tesseract/lang"),
+        gzip: true,
+      })
+    );
   });
 });

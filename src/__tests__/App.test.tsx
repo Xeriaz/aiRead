@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import App from '../App';
@@ -473,6 +473,10 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
 
       await user.upload(fileInput, [file1, file2]);
 
+      await waitFor(() => {
+        expect(screen.queryByTestId('batch-progress-banner')).not.toBeInTheDocument();
+      });
+
       // Wait for both items to appear in staging queue
       expect(await screen.findByTestId('one-by-one-wizard')).toBeInTheDocument();
       const stagingTable = screen.getByTestId('staging-queue-table');
@@ -605,6 +609,10 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
       const validFile = new File(['good-data'], 'valid.jpg', { type: 'image/jpeg' });
 
       await user.upload(fileInput, [corruptedFile, validFile]);
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('batch-progress-banner')).not.toBeInTheDocument();
+      });
 
       // Verify both items were queued into db.stagingRecords, corrupted has accuracyScore 0
       const staged = await db.stagingRecords.orderBy('id').toArray();
