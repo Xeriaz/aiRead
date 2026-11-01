@@ -8,6 +8,7 @@ import {
   calculateAccuracyScore,
   extractFullNameCandidates,
   extractLicensePlateCandidates,
+  extractPhoneCandidates,
   formatPhoneNumber,
   formatValidPeriod,
   isValidCalendarDate,
@@ -31,12 +32,12 @@ import {
 } from '../utils/export';
 
 describe('Parser, Accuracy Scoring & Multi-Candidate Utilities', () => {
-  it('normalizes Lithuanian phone numbers into 0-6XX-XXXXX format', () => {
-    expect(formatPhoneNumber('+370 612 34567')).toBe('0-612-34567');
-    expect(formatPhoneNumber('8 612 34567')).toBe('0-612-34567');
-    expect(formatPhoneNumber('869911223')).toBe('0-699-11223');
-    expect(formatPhoneNumber('061234567')).toBe('0-612-34567');
-    expect(formatPhoneNumber('0-612-34567')).toBe('0-612-34567');
+  it('normalizes Lithuanian phone numbers without forcing output format', () => {
+    expect(formatPhoneNumber('+370 612 34567')).toBe('+37061234567');
+    expect(formatPhoneNumber('8 612 34567')).toBe('861234567');
+    expect(formatPhoneNumber('869911223')).toBe('869911223');
+    expect(formatPhoneNumber('061234567')).toBe('061234567');
+    expect(formatPhoneNumber('+3705249226')).toBe('+3705249226');
   });
 
   it('normalizes validity period start and end dates into YYYY-MM-DD YYYY-MM-DD', () => {
@@ -114,7 +115,7 @@ describe('Parser, Accuracy Scoring & Multi-Candidate Utilities', () => {
     expect(parsed.fullName).toBe('Jonas Jonaitis');
     expect(parsed.personalCode).toBe('38504121234');
     expect(parsed.address).toBe('Žirgų g. 12');
-    expect(parsed.phone).toBe('0-612-34567');
+    expect(parsed.phone).toBe('+37061234567');
     expect(parsed.licensePlate).toBe('ABC 123');
     expect(parsed.carModel).toBe('TOYOTA COROLLA');
     expect(parsed.validPeriod).toBe('2026-09-04 2027-09-04');
@@ -122,7 +123,7 @@ describe('Parser, Accuracy Scoring & Multi-Candidate Utilities', () => {
     const candidates = parseDocumentCandidates(sampleOcr);
     expect(candidates.address).toEqual(['Žirgų g. 12', 'Kauno g. 15', 'Ryto g. 13']);
     expect(candidates.fullName).toEqual(['Jonas Jonaitis', 'Petras Petraitis']);
-    expect(candidates.phone).toEqual(['0-612-34567', '0-699-11223']);
+    expect(candidates.phone).toEqual(['+37061234567', '+37069911223']);
   });
 
   it('normalizes ALL-CAPS, mixed-case, and hyphenated names into Lithuanian Title Case', () => {
@@ -409,7 +410,7 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
 
     // Verify table row renders formatted values and green accuracy badge
     expect(await screen.findByText('Petras Petraitis')).toBeInTheDocument();
-    expect(screen.getByText('0-612-34567')).toBeInTheDocument();
+    expect(screen.getByText('+37061234567')).toBeInTheDocument();
     expect(screen.getByText('KMN 456')).toBeInTheDocument();
     expect(screen.getByText('AUDI A6')).toBeInTheDocument();
     expect(screen.getByText('2026-09-04 2027-09-04')).toBeInTheDocument();
@@ -493,18 +494,18 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
 
     // Alternative phone chip works too
     const phoneInput = screen.getByLabelText(/Telefonas/i);
-    expect(phoneInput).toHaveValue('0-655-44332');
+    expect(phoneInput).toHaveValue('865544332');
     const altPhoneChip = within(screen.getByTestId('candidates-phone')).getByRole('button', {
-      name: '0-612-34567',
+      name: '+37061234567',
     });
     await user.click(altPhoneChip);
-    expect(phoneInput).toHaveValue('0-612-34567');
+    expect(phoneInput).toHaveValue('+37061234567');
 
     await user.click(screen.getByRole('button', { name: /Išsaugoti įrašą/i }));
 
     expect(await screen.findByText('XYZ 789')).toBeInTheDocument();
     expect(screen.getByText('Kauno g. 15')).toBeInTheDocument();
-    expect(screen.getByText('0-612-34567')).toBeInTheDocument();
+    expect(screen.getByText('+37061234567')).toBeInTheDocument();
   });
 
   it('processes bulk uploaded images sequentially into db.stagingRecords with imageName and zero photo binary persistence, then verifies and approves one-by-one into db.records', async () => {
@@ -814,4 +815,29 @@ describe('aiRead CRUD, Accuracy Badges, Multi-Candidate Import & Bulk Staging Qu
     const bulkInput = screen.getByTestId('bulk-file-input');
     expect(bulkInput.getAttribute('accept')).toContain('application/pdf');
   });
+  it('extracts phone numbers in multiple formats without output format and provides selection chips for multiple numbers', () => {
+    // Single number in international +370 format (Image 1: Tel. / Phone No. +3705249226)
+    const sampleImage1 = `
+      Tel. / Phone No.
+      +3705249226
+    `;
+    expect(parseDocumentText(sampleImage1).phone).toBe('+3705249226');
+    expect(extractPhoneCandidates(sampleImage1)).toEqual(['+3705249226']);
+
+    // Multiple numbers on same line with semicolon (Image 2: Tel. 067466499; 37067466499)
+    const sampleImage2 = `
+      ŠILALĖS G. 6, KIENŲ K., VILNIAUS R.
+      Tel. 067466499; 37067466499
+    `;
+    const parsedImg2 = parseDocumentText(sampleImage2);
+    expect(parsedImg2.phone).toBe('067466499');
+    const candidatesImg2 = extractPhoneCandidates(sampleImage2);
+    expect(candidatesImg2).toEqual(['067466499', '37067466499']);
+
+    // Support +37061234567, 861234567, 061234567 without output format
+    expect(parseDocumentText('Tel. +37061234567').phone).toBe('+37061234567');
+    expect(parseDocumentText('Tel. 861234567').phone).toBe('861234567');
+    expect(parseDocumentText('Tel. 061234567').phone).toBe('061234567');
+  });
+
 });

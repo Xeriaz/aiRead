@@ -170,9 +170,38 @@ export function isValidLithuanianPersonalCode(code: string): boolean {
 }
 
 /**
- * Calculates a 0-100 data read accuracy score across all 7 extracted/verified fields,
- * optionally blended with Tesseract OCR confidence (80% field validation + 20% OCR confidence).
+ * Validates a Lithuanian phone string (mobile or landline):
+ * - "+370" followed by 7 or 8 digits (total 10-11 digits)
+ * - "00370" followed by 7 or 8 digits (total 12-13 digits)
+ * - "370" followed by 7 or 8 digits (total 10-11 digits)
+ * - "8" followed by 8 digits (total 9 digits, e.g. 861234567, 85249226)
+ * - "0" followed by 8 digits (total 9 digits, e.g. 061234567, 067466499)
+ * - 8 digits starting with 5 or 6 (mobile/landline, e.g. 61234567, 5249226)
+ * - Legacy formatted /^0-\d{3}-\d{5}$/
  */
+export function isValidLithuanianPhoneNumber(phone: string): boolean {
+  if (!phone) return false;
+  const trimmed = phone.trim();
+  if (/^0-\d{3}-\d{5}$/.test(trimmed)) return true;
+  const digits = trimmed.replace(/\D/g, '');
+  if (trimmed.startsWith('+370')) {
+    return digits.length >= 10 && digits.length <= 11;
+  }
+  if (digits.startsWith('00370')) {
+    return digits.length >= 12 && digits.length <= 13;
+  }
+  if (digits.startsWith('370')) {
+    return digits.length >= 10 && digits.length <= 11;
+  }
+  if (digits.startsWith('8') || digits.startsWith('0')) {
+    return digits.length === 9;
+  }
+  if (digits.startsWith('5') || digits.startsWith('6')) {
+    return digits.length === 8;
+  }
+  return false;
+}
+
 export function calculateAccuracyScore(
   fields: ParsedDocumentFields,
   ocrConfidence?: number
@@ -205,13 +234,13 @@ export function calculateAccuracyScore(
     }
   }
 
-  // 3. phone (15 pts): 15 pts if matches /^0-\d{3}-\d{5}$/; 7 pts if 8–11 digits; 0 pts otherwise.
+  // 3. phone (15 pts): 15 pts if valid Lithuanian phone number; 7 pts if 7–12 digits; 0 pts otherwise.
   const ph = (fields.phone || '').trim();
-  if (/^0-\d{3}-\d{5}$/.test(ph)) {
+  if (isValidLithuanianPhoneNumber(ph)) {
     fieldScore += 15;
   } else {
     const phoneDigits = ph.replace(/\D/g, '');
-    if (phoneDigits.length >= 8 && phoneDigits.length <= 11) {
+    if (phoneDigits.length >= 7 && phoneDigits.length <= 12) {
       fieldScore += 7;
     }
   }
@@ -274,39 +303,23 @@ export function calculateAccuracyScore(
 }
 
 /**
- * Formats any Lithuanian phone number representation into "0-6XX-XXXXX" (e.g. "0-612-34567").
+ * Cleans any Lithuanian phone number representation without output formatting (no hyphens/spaces):
+ * Preserves leading '+' if present and removes spaces, dashes, dots, parentheses:
+ * e.g. "+370 612 34567" -> "+37061234567"
+ * "8 612 34567" -> "861234567"
+ * "0 612 34567" -> "061234567"
+ * "0-612-34567" -> "061234567"
+ * "+370 5 249226" -> "+3705249226"
  */
 export function formatPhoneNumber(raw: string): string {
   if (!raw || !raw.trim()) return '';
   const trimmed = raw.trim();
 
-  // If already in 0-XXX-XXXXX format
-  if (/^0-\d{3}-\d{5}$/.test(trimmed)) {
-    return trimmed;
-  }
-
+  const hasPlus = trimmed.startsWith('+');
   const digits = trimmed.replace(/\D/g, '');
-  if (!digits) return trimmed;
+  if (!digits) return '';
 
-  let normalizedNine = '';
-
-  if (digits.startsWith('00370') && digits.length >= 13) {
-    normalizedNine = '0' + digits.slice(5, 13);
-  } else if (digits.startsWith('370') && digits.length >= 11) {
-    normalizedNine = '0' + digits.slice(3, 11);
-  } else if (digits.startsWith('8') && digits.length === 9) {
-    normalizedNine = '0' + digits.slice(1);
-  } else if (digits.startsWith('0') && digits.length === 9) {
-    normalizedNine = digits;
-  } else if (digits.startsWith('6') && digits.length === 8) {
-    normalizedNine = '0' + digits;
-  }
-
-  if (normalizedNine.length === 9) {
-    return `${normalizedNine.slice(0, 1)}-${normalizedNine.slice(1, 4)}-${normalizedNine.slice(4, 9)}`;
-  }
-
-  return trimmed;
+  return (hasPlus ? '+' : '') + digits;
 }
 
 /**
@@ -505,30 +518,40 @@ export function extractPhoneCandidates(
     )
   );
 
-  // 1. Look near phone labels first
-  const labeledLineRegex =
-    /(?:tel(?:\.|efonas)?|mob(?:\.|ilus)?|phone)[:\s]*((?:\+370|00370|370|8|0)[\s()-]*(?:\d[\s()-]*){7,8})/gi;
-  for (const labeledMatch of text.matchAll(labeledLineRegex)) {
-    const formatted = formatPhoneNumber(labeledMatch[1]);
-    if (/^0-\d{3}-\d{5}$/.test(formatted)) {
-      addUniqueCandidate(candidates, formatted);
+  const checkAndAdd = (raw: string) => {
+    const cleaned = formatPhoneNumber(raw);
+    const digits = cleaned.replace(/\D/g, '');
+    if (!digits || excludedSet.has(digits)) return;
+    if (isValidLithuanianPhoneNumber(cleaned)) {
+      addUniqueCandidate(candidates, cleaned);
+    }
+  };
+
+  // 1. Look near phone labels first (supporting Tel., Mob., Phone No., Tel. / Phone No., etc.)
+  // and supporting multiple numbers separated by semicolon, comma, slash, or whitespace
+  const lines = text.split(/\r?\n/);
+  const labelIndicator = /(?:tel(?:\.|efonas)?|mob(?:\.|ilus)?|phone(?:\s*no\.?)?)/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (labelIndicator.test(line)) {
+      const windowStr = [line, lines[i + 1] || ''].join(' ');
+      const matches = windowStr.matchAll(/(?:\+370|00370|\b370|\b8|\b0)[\d\s()./-]{7,25}\b/g);
+      for (const m of matches) {
+        const subParts = m[0].split(/[;,/|\n]/);
+        for (const sp of subParts) {
+          checkAndAdd(sp);
+        }
+      }
     }
   }
 
-  // 2. General Lithuanian mobile/phone pattern across text
-  const phoneRegex =
-    /(?:\+370|00370|(?:\b370)|(?:\b8)|(?:\b0))[\s.-]*\(?6\d{2}\)?[\s.-]*\d{2}[\s.-]*\d{3}\b|(?:\b0-\d{3}-\d{5}\b)/g;
+  // 2. Scan general Lithuanian mobile & landline patterns across entire text
+  const globalPhoneRegex =
+    /(?:\+370|00370|\b370)[\s.-]*\(?[56]\d{1,2}\)?[\s.-]*\d{2}[\s.-]*\d{2,3}(?:[\s.-]*\d{2,3})?\b|\b[08][\s.-]*\(?[56]\d{1,2}\)?[\s.-]*\d{2}[\s.-]*\d{2,3}(?:[\s.-]*\d{2,3})?\b|\b(?:\+370|00370|370)\d{7,8}\b|\b[08][56]\d{7}\b/g;
 
-  for (const match of text.matchAll(phoneRegex)) {
-    const rawCandidate = match[0];
-    const digitsOnly = rawCandidate.replace(/\D/g, '');
-    if (excludedSet.has(digitsOnly)) {
-      continue;
-    }
-    const formatted = formatPhoneNumber(rawCandidate);
-    if (/^0-\d{3}-\d{5}$/.test(formatted)) {
-      addUniqueCandidate(candidates, formatted);
-    }
+  for (const match of text.matchAll(globalPhoneRegex)) {
+    checkAndAdd(match[0]);
   }
 
   return candidates;
