@@ -125,6 +125,38 @@ export function isValidCalendarDate(year: number, month: number, day: number): b
 }
 
 /**
+ * Computes official Modulo-11 checksum for the first 10 digits of a Lithuanian personal code.
+ * Returns null if input is not exactly 10 digits.
+ */
+export function computeLithuanianPersonalCodeChecksum(tenDigits: string): number | null {
+  if (!tenDigits || tenDigits.length !== 10 || !/^\d{10}$/.test(tenDigits)) {
+    return null;
+  }
+  const digits = tenDigits.split('').map(Number);
+  const weights1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 1];
+  const weights2 = [3, 4, 5, 6, 7, 8, 9, 1, 2, 3];
+
+  let sum1 = 0;
+  for (let i = 0; i < 10; i++) {
+    sum1 += digits[i] * weights1[i];
+  }
+  let remainder = sum1 % 11;
+
+  if (remainder === 10) {
+    let sum2 = 0;
+    for (let i = 0; i < 10; i++) {
+      sum2 += digits[i] * weights2[i];
+    }
+    remainder = sum2 % 11;
+    if (remainder === 10) {
+      remainder = 0;
+    }
+  }
+
+  return remainder;
+}
+
+/**
  * Validates an 11-digit Lithuanian personal code (Asmens kodas),
  * including strict calendar birth date validation and the official modulo-11 checksum algorithm.
  */
@@ -146,27 +178,95 @@ export function isValidLithuanianPersonalCode(code: string): boolean {
     return false;
   }
 
-  const weights1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 1];
-  const weights2 = [3, 4, 5, 6, 7, 8, 9, 1, 2, 3];
-
-  let sum1 = 0;
-  for (let i = 0; i < 10; i++) {
-    sum1 += digits[i] * weights1[i];
-  }
-  let remainder = sum1 % 11;
-
-  if (remainder === 10) {
-    let sum2 = 0;
-    for (let i = 0; i < 10; i++) {
-      sum2 += digits[i] * weights2[i];
-    }
-    remainder = sum2 % 11;
-    if (remainder === 10) {
-      remainder = 0;
-    }
+  const currentYear = new Date().getFullYear();
+  if (century + yy > currentYear + 1) {
+    return false;
   }
 
-  return digits[10] === remainder;
+  const expectedChecksum = computeLithuanianPersonalCodeChecksum(trimmed.slice(0, 10));
+  return expectedChecksum !== null && digits[10] === expectedChecksum;
+}
+
+/**
+ * Attempts to repair an 11-digit Lithuanian personal code that failed checksum,
+ * testing single-digit OCR handwriting confusions and single-digit mutations
+ * to find if a unique valid personal code with matching calendar date and checksum exists.
+ */
+export function repairLithuanianPersonalCode(code: string): string | null {
+  if (!code || code.length !== 11 || !/^\d{11}$/.test(code)) {
+    return null;
+  }
+  if (isValidLithuanianPersonalCode(code)) {
+    return code;
+  }
+
+  // Case 1: The first 10 digits form a valid date, only the 11th checksum digit was misread/corrupted
+  const tenDigits = code.slice(0, 10);
+  const firstDigit = Number(tenDigits[0]);
+  const century = firstDigit === 1 || firstDigit === 2 ? 1800 : firstDigit === 3 || firstDigit === 4 ? 1900 : 2000;
+  const yy = Number(tenDigits.slice(1, 3));
+  const mm = Number(tenDigits.slice(3, 5));
+  const dd = Number(tenDigits.slice(5, 7));
+  const currentYear = new Date().getFullYear();
+
+  if (isValidCalendarDate(century + yy, mm, dd) && century + yy <= currentYear + 1) {
+    const expectedChecksum = computeLithuanianPersonalCodeChecksum(tenDigits);
+    if (expectedChecksum !== null) {
+      return `${tenDigits}${expectedChecksum}`;
+    }
+  }
+
+  // Case 2: One of the first 10 digits was misread/confused
+  const digits = code.split("");
+  const validRepairs: string[] = [];
+
+  const confusionMap: Record<string, string[]> = {
+    "0": ["6", "8", "9"],
+    "1": ["7", "4"],
+    "2": ["7", "3"],
+    "3": ["5", "8", "9"],
+    "4": ["1", "9", "5"],
+    "5": ["3", "6", "8", "4"],
+    "6": ["0", "5", "8"],
+    "7": ["1", "2"],
+    "8": ["0", "3", "6", "9", "5"],
+    "9": ["0", "8", "3", "4"],
+  };
+
+  for (let pos = 0; pos < 10; pos++) {
+    const orig = digits[pos];
+    const alts = confusionMap[orig] || [];
+    for (const alt of alts) {
+      digits[pos] = alt;
+      const candidate = digits.join("");
+      if (isValidLithuanianPersonalCode(candidate)) {
+        if (!validRepairs.includes(candidate)) {
+          validRepairs.push(candidate);
+        }
+      }
+    }
+    digits[pos] = orig;
+  }
+
+  if (validRepairs.length === 1) {
+    return validRepairs[0];
+  }
+
+  return null;
+}
+
+export function normalizeOcrDigits(raw: string): string {
+  return raw
+    .replace(/[OoD]/g, '0')
+    .replace(/[Il|\/!\]]/g, '1')
+    .replace(/[Zz]/g, '2')
+    .replace(/[E]/g, '3')
+    .replace(/[Ah]/g, '4')
+    .replace(/[Ss]/g, '5')
+    .replace(/[bG]/g, '6')
+    .replace(/[TF]/g, '7')
+    .replace(/[B]/g, '8')
+    .replace(/[gq]/g, '9');
 }
 
 /**
@@ -462,25 +562,83 @@ export function splitValidPeriod(validPeriod: string): [string, string] {
 
 /**
  * Extracts all distinct 11-digit Lithuanian personal code candidates while ignoring +3706... phone numbers.
+ * Supports:
+ * - Standard contiguous 11 digits
+ * - Space-separated and delimited handwritten digits (e.g. "3 8 5 0 4 1 2 1 2 3 4" or "46 7 11 18 0212")
+ * - Labeled single-line and multi-line codes (e.g. "a.k.", "asmens kodas", "personal code")
+ * - OCR character confusion recovery (e.g. letter O -> 0, letter l/I -> 1)
+ * - Single-digit checksum auto-correction
+ * - Prioritizes checksum-verified codes at the top of candidate list
  */
 export function extractPersonalCodeCandidates(text: string): string[] {
   if (!text) return [];
-  const candidates: string[] = [];
+  const rawCandidates: string[] = [];
+  const rawLines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 
-  // 1. Check explicitly labeled personal codes first
-  const labeledRegex =
-    /(?:a\s*\.\s*k\s*\.?|asmens\s+kodas|personal\s+code|id\s+kodas)[:\s#-]*([1-6]\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{4})\b/gi;
-  for (const match of text.matchAll(labeledRegex)) {
-    addUniqueCandidate(candidates, match[1]);
+  const considerCandidate = (raw: string) => {
+    if (!raw) return;
+    const digitsOnly = raw.replace(/\D/g, '');
+    if (digitsOnly.length === 11) {
+      addUniqueCandidate(rawCandidates, digitsOnly);
+      if (!isValidLithuanianPersonalCode(digitsOnly)) {
+        const repaired = repairLithuanianPersonalCode(digitsOnly);
+        if (repaired && repaired !== digitsOnly) {
+          addUniqueCandidate(rawCandidates, repaired);
+        }
+      }
+    } else if (digitsOnly.length === 10 && /^[1-6]\d{9}$/.test(digitsOnly)) {
+      const checksum = computeLithuanianPersonalCodeChecksum(digitsOnly);
+      if (checksum !== null) {
+        const completed = `${digitsOnly}${checksum}`;
+        if (isValidLithuanianPersonalCode(completed)) {
+          addUniqueCandidate(rawCandidates, completed);
+        }
+      }
+    }
+  };
+
+  // 1. Explicitly labeled personal codes (single-line and stacked multi-line)
+  const labelPrefix = /(?:a\s*\.?\s*k\s*\.?|asmens\s+kodas|personal\s+code|id\s+kodas|a\/k)\b/i;
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+    if (labelPrefix.test(line)) {
+      // Examine remaining text on same line
+      const after = line
+        .replace(/.*?(?:a\s*\.?\s*k\s*\.?|asmens\s+kodas|personal\s+code|id\s+kodas|a\/k)[:\s#-.]*/i, '')
+        .trim();
+      if (after) {
+        const normalizedAfter = normalizeOcrDigits(after);
+        const seqMatches = normalizedAfter.match(/[1-6](?:[\s./|\\-]*\d){9,10}/g);
+        if (seqMatches) {
+          for (const m of seqMatches) considerCandidate(m);
+        } else {
+          considerCandidate(normalizedAfter);
+        }
+      }
+
+      // Examine next 1-2 lines for stacked/boxed layouts
+      for (let j = i + 1; j < Math.min(rawLines.length, i + 3); j++) {
+        const nextLine = rawLines[j];
+        if (!nextLine || labelPrefix.test(nextLine)) break;
+        if (/(?:adresas|tel|valst|galioj|mark[eė])/i.test(nextLine)) break;
+        const normalizedNext = normalizeOcrDigits(nextLine);
+        const seqMatches = normalizedNext.match(/[1-6](?:[\s./|\\-]*\d){9,10}/g);
+        if (seqMatches) {
+          for (const m of seqMatches) considerCandidate(m);
+        } else {
+          considerCandidate(normalizedNext);
+        }
+      }
+    }
   }
 
-  // 2. Scan all 11-digit valid Lithuanian personal code patterns
+  // 2. Scan contiguous 11-digit patterns
   const globalRegex = /\b([1-6]\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{4})\b/g;
   for (const match of text.matchAll(globalRegex)) {
     const candidate = match[1];
     const index = match.index ?? 0;
     const prefix = text.slice(Math.max(0, index - 4), index);
-    // Ignore if preceded by '+' (e.g. +37061234567) or if it starts with 3706 and looks like a phone
     if (prefix.includes('+')) continue;
     if (candidate.startsWith('3706')) {
       const lineStart = text.lastIndexOf('\n', index) + 1;
@@ -490,10 +648,41 @@ export function extractPersonalCodeCandidates(text: string): string[] {
         continue;
       }
     }
-    addUniqueCandidate(candidates, candidate);
+    considerCandidate(candidate);
   }
 
-  return candidates;
+  // 3. Scan space-separated or delimiter-separated sequences across all lines
+  for (const line of rawLines) {
+    if (/\b(?:tel|mob|phone|iban|sąskaita)\b/i.test(line)) continue;
+    const normalizedLine = normalizeOcrDigits(line);
+    const matches = normalizedLine.match(/(?:^|[^0-9A-Za-z])([1-6](?:[\s./|\\-]*\d){10})(?:$|[^0-9A-Za-z])/g);
+    if (matches) {
+      for (const m of matches) {
+        considerCandidate(m);
+      }
+    }
+  }
+
+  // 4. Filter and rank candidates:
+  // - Top rank: Valid Lithuanian personal code with matching date and checksum
+  // - Mid rank: Valid Lithuanian personal code date structure
+  // - Low rank: Other 11-digit candidates
+  const unique = Array.from(new Set(rawCandidates));
+  unique.sort((a, b) => {
+    const scoreA = isValidLithuanianPersonalCode(a)
+      ? 100
+      : LITHUANIAN_PERSONAL_CODE_DATE_REGEX.test(a)
+      ? 50
+      : 0;
+    const scoreB = isValidLithuanianPersonalCode(b)
+      ? 100
+      : LITHUANIAN_PERSONAL_CODE_DATE_REGEX.test(b)
+      ? 50
+      : 0;
+    return scoreB - scoreA;
+  });
+
+  return unique;
 }
 
 /**

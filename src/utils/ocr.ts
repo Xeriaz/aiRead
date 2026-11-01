@@ -289,7 +289,7 @@ export async function extractTextAndConfidenceFromImageFile(
 
 /**
  * Pre-processes an image File in transient memory on an offscreen canvas
- * (downscales to max 2000px and increases grayscale contrast for cleaner OCR),
+ * (upscales small crops, adds whitespace padding, boosts contrast, and suppresses form underlines),
  * runs local Tesseract.js OCR (Lithuanian + English), and immediately destroys
  * all temporary image buffers and object URLs.
  */
@@ -324,16 +324,30 @@ async function preprocessImageInMemory(
         let width = img.naturalWidth || img.width || 1000;
         let height = img.naturalHeight || img.height || 1000;
 
+        // Downscale oversized images
         if (width > maxDim || height > maxDim) {
           const scale = maxDim / Math.max(width, height);
           width = Math.round(width * scale);
           height = Math.round(height * scale);
         }
 
+        // Upscale small crops / low-resolution images so character strokes are clear for OCR
+        const minDim = 300;
+        if (height < minDim || width < 600) {
+          const upScale = Math.min(
+            3.5,
+            Math.max(1.5, 600 / Math.max(width, 100), minDim / Math.max(height, 50))
+          );
+          width = Math.round(width * upScale);
+          height = Math.round(height * upScale);
+        }
+
+        // Add 20px padding margin around the image to prevent edge-touching characters from clipping
+        const padding = 20;
         const canvas = document.createElement('canvas');
         registerCanvas(canvas);
-        canvas.width = width;
-        canvas.height = height;
+        canvas.width = width + padding * 2;
+        canvas.height = height + padding * 2;
 
         const ctx = canvas.getContext('2d');
         if (!ctx) {
@@ -341,20 +355,55 @@ async function preprocessImageInMemory(
           return;
         }
 
-        ctx.drawImage(img, 0, 0, width, height);
-        const imageData = ctx.getImageData(0, 0, width, height);
-        const data = imageData.data;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, padding, padding, width, height);
 
-        // Grayscale + contrast boost for crisp receipt/document text
-        const contrast = 1.35;
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        const canvasWidth = canvas.width;
+        const canvasHeight = canvas.height;
+
+        // Grayscale + dynamic contrast boost
+        const contrast = 1.45;
         const intercept = 128 * (1 - contrast);
 
-        for (let i = 0; i < data.length; i += 4) {
+        const grayBuffer = new Uint8Array(canvasWidth * canvasHeight);
+        for (let i = 0, p = 0; i < data.length; i += 4, p++) {
           const luminance = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
           const boosted = Math.max(0, Math.min(255, luminance * contrast + intercept));
           data[i] = boosted;
           data[i + 1] = boosted;
           data[i + 2] = boosted;
+          grayBuffer[p] = boosted;
+        }
+
+        // Horizontal line suppression for form field underlines:
+        // Detect long horizontal lines (1-3px thick) where neighboring vertical pixels are background
+        for (let y = padding + 2; y < canvasHeight - padding - 2; y++) {
+          let darkCountInRow = 0;
+          for (let x = padding; x < canvasWidth - padding; x++) {
+            if (grayBuffer[y * canvasWidth + x] < 140) {
+              darkCountInRow++;
+            }
+          }
+          // If a row has a continuous horizontal stroke spanning > 35% of content width
+          if (darkCountInRow > (canvasWidth - padding * 2) * 0.35) {
+            for (let x = padding; x < canvasWidth - padding; x++) {
+              const idx = y * canvasWidth + x;
+              const above = (y - 3) * canvasWidth + x;
+              const below = (y + 3) * canvasWidth + x;
+              // If surrounding vertical space is light/background, suppress the thin underline
+              if (grayBuffer[above] > 180 && grayBuffer[below] > 180) {
+                const dataIdx = idx * 4;
+                data[dataIdx] = 255;
+                data[dataIdx + 1] = 255;
+                data[dataIdx + 2] = 255;
+              }
+            }
+          }
         }
 
         ctx.putImageData(imageData, 0, 0);
