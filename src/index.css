@@ -72,6 +72,12 @@ body {
   padding-bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px));
 }
 
+@media (min-width: 768px) {
+  .bottom-bar-padding {
+    padding-bottom: 2rem;
+  }
+}
+
 .glass-panel {
   background-color: color-mix(in srgb, var(--bg-card) 88%, transparent);
   backdrop-filter: blur(16px);
