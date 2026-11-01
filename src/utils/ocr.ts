@@ -27,6 +27,16 @@ interface ActiveEphemeralEntry {
  */
 export const IMAGE_MEMORY_TTL_MS = 30_000;
 
+/**
+ * Idle watchdog timeout for warm Tesseract worker in RAM (60 seconds).
+ */
+export const WARM_WORKER_IDLE_TIMEOUT_MS = 60_000;
+
+/**
+ * Maximum timeout for a single OCR image recognition pass (45 seconds).
+ */
+export const OCR_TIMEOUT_MS = 45_000;
+
 const activeEphemeralRegistry = new Set<ActiveEphemeralEntry>();
 
 async function disposeEphemeralEntry(entry: ActiveEphemeralEntry): Promise<void> {
@@ -68,9 +78,9 @@ async function disposeEphemeralEntry(entry: ActiveEphemeralEntry): Promise<void>
 }
 
 /**
- * Registers an ephemeral image resource (blob URL, offscreen canvas, and/or Tesseract worker)
- * with a hard 30-second TTL watchdog timer. If OCR hangs or is interrupted, the watchdog
- * automatically revokes the blob URL, zeroes the canvas dimensions, and terminates the worker.
+ * Registers an ephemeral image resource (blob URL and offscreen canvas)
+ * with a hard 30-second TTL watchdog timer. If processing hangs or is interrupted, the watchdog
+ * automatically revokes the blob URL and zeroes the canvas dimensions.
  */
 export function registerEphemeralResource(
   handle: EphemeralResourceHandle,
@@ -90,18 +100,39 @@ export function registerEphemeralResource(
 }
 
 /**
- * Shared warm worker state for batch scans to avoid repeated heavy initialization.
+ * Warm worker singleton state and idle timer.
  */
+let warmWorker: Worker | null = null;
 let warmWorkerPromise: Promise<Worker> | null = null;
-let warmWorkerHandle: EphemeralResourceHandle | null = null;
-let warmWorkerRelease: (() => Promise<void>) | null = null;
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
 let currentProgressCallback: OcrProgressCallback | null = null;
 
-async function getOrCreateWarmWorker(): Promise<Worker> {
-  // If a warm worker entry exists and is active, reset its TTL watchdog
-  if (warmWorkerRelease) {
-    await warmWorkerRelease();
-    warmWorkerRelease = null;
+function scheduleWarmWorkerIdle(): void {
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+  if (!warmWorker && !warmWorkerPromise) {
+    return;
+  }
+  idleTimer = setTimeout(() => {
+    void terminateWarmWorker();
+  }, WARM_WORKER_IDLE_TIMEOUT_MS);
+}
+
+/**
+ * Gets the existing warm worker or creates a new one.
+ * If an idle timer is pending, cancels the timer and retains the existing alive worker.
+ */
+export async function getOrCreateWarmWorker(): Promise<Worker> {
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+
+  if (warmWorker) {
+    scheduleWarmWorkerIdle();
+    return warmWorker;
   }
 
   if (!warmWorkerPromise) {
@@ -113,27 +144,63 @@ async function getOrCreateWarmWorker(): Promise<Worker> {
           }
         },
       });
+      warmWorker = worker;
       return worker;
     })().catch((err) => {
+      warmWorker = null;
       warmWorkerPromise = null;
       throw err;
     });
   }
 
   const worker = await warmWorkerPromise;
-  warmWorkerHandle = { worker };
-  warmWorkerRelease = registerEphemeralResource(warmWorkerHandle, IMAGE_MEMORY_TTL_MS);
+  scheduleWarmWorkerIdle();
   return worker;
 }
 
 /**
+ * Cleanly releases warm Tesseract OCR worker memory.
+ * Cancels pending idle watchdog timer, terminates worker, and clears references.
+ */
+export async function terminateWarmWorker(): Promise<void> {
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+  const workerToTerminate = warmWorker;
+  const inFlightPromise = warmWorkerPromise;
+  warmWorker = null;
+  warmWorkerPromise = null;
+
+  if (workerToTerminate) {
+    try {
+      await workerToTerminate.terminate();
+    } catch {
+      // Ignore worker termination errors
+    }
+  } else if (inFlightPromise) {
+    try {
+      const w = await inFlightPromise;
+      await w.terminate();
+    } catch {
+      // Ignore worker termination errors
+    }
+  }
+}
+
+/**
+ * Returns the current warm worker instance, if any (primarily for inspection/testing).
+ */
+export function getWarmWorker(): Worker | null {
+  return warmWorker;
+}
+
+/**
  * Immediately purges all active ephemeral image buffers, blob URLs, offscreen canvases,
- * and OCR workers currently registered in RAM.
+ * and releases warm OCR worker currently registered in RAM.
  */
 export function cleanupAllEphemeralResources(): void {
-  warmWorkerPromise = null;
-  warmWorkerHandle = null;
-  warmWorkerRelease = null;
+  void terminateWarmWorker();
   currentProgressCallback = null;
 
   for (const entry of Array.from(activeEphemeralRegistry)) {
@@ -148,14 +215,14 @@ export function getActiveEphemeralResourceCount(): number {
 }
 
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-  window.addEventListener('pagehide', cleanupAllEphemeralImages);
+  window.addEventListener('pagehide', cleanupAllEphemeralResources);
 }
 
 /**
  * Pre-processes an image File in transient memory on an offscreen canvas,
- * runs local Tesseract.js OCR (Lithuanian + English), returns extracted text and
- * OCR confidence (0-100), and strictly destroys all temporary image buffers via
- * both `finally` cleanup and the 30-second hard TTL watchdog.
+ * runs local Tesseract.js OCR (Lithuanian + English) using a shared warm worker,
+ * applies an explicit per-image OCR timeout (45 seconds), returns extracted text and confidence,
+ * and strictly destroys temporary image buffers via both `finally` cleanup and the 30-second hard TTL watchdog.
  */
 export async function extractTextAndConfidenceFromImageFile(
   file: File,
@@ -178,17 +245,38 @@ export async function extractTextAndConfidenceFromImageFile(
     onProgress?.(15);
     const worker = await getOrCreateWarmWorker();
 
-    const {
-      data: { text, confidence },
-    } = await worker.recognize(processedSource);
-    onProgress?.(100);
-    return {
-      text: text || '',
-      confidence: typeof confidence === 'number' ? confidence : undefined,
-    };
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(`OCR recognition timed out after ${OCR_TIMEOUT_MS}ms`));
+      }, OCR_TIMEOUT_MS);
+    });
+
+    try {
+      const recognitionPromise = worker.recognize(processedSource);
+      recognitionPromise.catch(() => {});
+
+      const {
+        data: { text, confidence },
+      } = await Promise.race([recognitionPromise, timeoutPromise]);
+
+      onProgress?.(100);
+      return {
+        text: text || '',
+        confidence: typeof confidence === 'number' ? confidence : undefined,
+      };
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  } catch (err) {
+    await terminateWarmWorker();
+    throw err;
   } finally {
     currentProgressCallback = null;
     await releaseImageResources();
+    scheduleWarmWorkerIdle();
   }
 }
 

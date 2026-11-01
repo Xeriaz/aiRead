@@ -13,7 +13,10 @@ import {
 } from 'lucide-react';
 import { db, type StagingRecord } from '../db/db';
 import type { Translations } from '../i18n/translations';
-import { extractTextAndConfidenceFromImageFile } from '../utils/ocr';
+import {
+  extractTextAndConfidenceFromImageFile,
+  terminateWarmWorker,
+} from '../utils/ocr';
 import {
   calculateAccuracyScore,
   parseDocumentCandidates,
@@ -172,6 +175,11 @@ export const BulkStagingTab: React.FC<BulkStagingTabProps> = ({
         await onReloadStaging();
       }
     } finally {
+      try {
+        await terminateWarmWorker();
+      } catch {
+        // Ignore worker termination errors during cleanup
+      }
       setIsBatchProcessing(false);
       setBatchCurrentIndex(0);
       setBatchTotalCount(0);
