@@ -2,7 +2,6 @@ import React from 'react';
 import { AlertCircle, CheckCircle2 } from 'lucide-react';
 import { translations, type Translations } from '../i18n/translations';
 import {
-  addOneYearToDate,
   formatPhoneNumber,
   formatValidPeriod,
   splitValidPeriod,
@@ -141,10 +140,8 @@ export interface RecordFieldsEditorProps {
 export const RecordFieldsEditor: React.FC<RecordFieldsEditorProps> = ({
   values,
   onChange,
-  target,
   idPrefix,
   candidates,
-  onAddOneYear,
   t,
 }) => {
   const activeT = t || translations.lt;
@@ -155,20 +152,6 @@ export const RecordFieldsEditor: React.FC<RecordFieldsEditorProps> = ({
     const nextEnd = part === 'end' ? newIso : endDate;
     const combined = [nextStart, nextEnd].filter(Boolean).join(' ');
     onChange((prev) => ({ ...prev, validPeriod: combined }));
-  };
-
-  const handleAddYear = () => {
-    if (onAddOneYear) {
-      onAddOneYear(target, values.validPeriod);
-    } else {
-      const [start] = splitValidPeriod(values.validPeriod);
-      if (!start || !/^\d{4}-\d{2}-\d{2}$/.test(start)) {
-        return;
-      }
-      const nextYear = addOneYearToDate(start);
-      const updated = `${start} ${nextYear}`;
-      onChange((prev) => ({ ...prev, validPeriod: updated }));
-    }
   };
 
   const emptyFieldKeys = FORM_FIELD_KEYS.filter((k) => values[k].trim().length === 0);
@@ -428,24 +411,15 @@ export const RecordFieldsEditor: React.FC<RecordFieldsEditorProps> = ({
 
         {/* Galiojimas (YYYY-MM-DD YYYY-MM-DD) */}
         <div className="sm:col-span-2 space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <label
-                htmlFor={`${idPrefix}-validPeriod`}
-                className="block text-xs font-medium text-slate-700 dark:text-zinc-300"
-              >
-                {activeT.columns.validPeriod}{' '}
-                <span className="text-[11px] text-slate-400">(YYYY-MM-DD YYYY-MM-DD)</span>
-              </label>
-              {renderFieldStatusBadge('validPeriod', values.validPeriod)}
-            </div>
-            <button
-              type="button"
-              onClick={handleAddYear}
-              className="touch-press text-[11px] font-medium px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20"
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <label
+              htmlFor={`${idPrefix}-validPeriod`}
+              className="block text-xs font-medium text-slate-700 dark:text-zinc-300"
             >
-              {activeT.actions.addOneYear}
-            </button>
+              {activeT.columns.validPeriod}{' '}
+              <span className="text-[11px] text-slate-400">(YYYY-MM-DD YYYY-MM-DD)</span>
+            </label>
+            {renderFieldStatusBadge('validPeriod', values.validPeriod)}
           </div>
           <input
             id={`${idPrefix}-validPeriod`}

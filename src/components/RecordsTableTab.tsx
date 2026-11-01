@@ -2,7 +2,6 @@ import React, { useMemo } from 'react';
 import {
   Calendar,
   Car,
-  Copy,
   Download,
   Edit3,
   LayoutGrid,
@@ -31,7 +30,7 @@ export interface RecordsTableTabProps {
   onNewRecord: () => void;
   onNavigateToImport: () => void;
   onEditRecord: (rec: TableRecord) => void;
-  onDuplicateRecord: (rec: TableRecord) => void;
+  onDuplicateRecord?: (rec: TableRecord) => void;
   onDeleteRecord: (id?: number) => void;
   lang: Language;
   t: Translations;
@@ -46,7 +45,6 @@ export const RecordsTableTab: React.FC<RecordsTableTabProps> = ({
   onNewRecord,
   onNavigateToImport,
   onEditRecord,
-  onDuplicateRecord,
   onDeleteRecord,
   lang,
   t,
@@ -285,14 +283,6 @@ export const RecordsTableTab: React.FC<RecordsTableTabProps> = ({
                             className="touch-press p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-zinc-800"
                           >
                             <Edit3 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onDuplicateRecord(rec)}
-                            aria-label={`${t.actions.duplicate} ${rec.fullName || index + 1}`}
-                            className="touch-press p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-zinc-800"
-                          >
-                            <Copy className="w-3.5 h-3.5" />
                           </button>
                           <button
                             type="button"

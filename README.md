@@ -14,7 +14,7 @@
 
 ## ✨ Key Features
 
-- **Full CRUD Data Table:** Create, view, edit, duplicate, delete, and search structured records with automatic formatting and validation.
+- **Full CRUD Data Table:** Create, view, edit, delete, and search structured records with automatic formatting and validation.
 - **Read Accuracy Scoring:** Automatically evaluates extraction and validation quality (`0–100%`) for every entry with color-coded status badges (Green, Amber, Red).
 - **Smart Local Photo Import & Multi-Candidate Selection:** Scan a photo or paste raw text to populate fields automatically. When multiple potential matches for a field are detected in a scan, the primary match fills the input and alternative matches appear as clickable chips below it.
 - **Bilingual UI:** Supports **Lithuanian (`LT`)** as the primary default language and **English (`EN`)** as the secondary language.
